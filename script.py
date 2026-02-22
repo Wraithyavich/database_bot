@@ -96,40 +96,37 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return
 
     # ---------- Частичный поиск (длина >= MIN_SEARCH_LENGTH) ----------
-    # Множество для хранения уникальных пар (оригинальный ключ, значение)
-    unique_pairs = set()
+    # Множество для уникальных значений из противоположного столбца
+    values_set = set()
 
-    # Поиск по первому столбцу (Turbo P/N)
+    # Поиск по первому столбцу (Turbo P/N) – нашли ключ, берём значения из второго столбца
     for key_lower, original_keys in col1_lower_to_original.items():
         if user_input_lower in key_lower:
             for orig_key in original_keys:
                 for val in dict_by_col1[orig_key]:
-                    unique_pairs.add((orig_key, val))
+                    values_set.add(val)
 
-    # Поиск по второму столбцу (E&E P/N)
+    # Поиск по второму столбцу (E&E P/N) – нашли ключ, берём значения из первого столбца
     for key_lower, original_keys in col2_lower_to_original.items():
         if user_input_lower in key_lower:
             for orig_key in original_keys:
                 for val in dict_by_col2[orig_key]:
-                    unique_pairs.add((orig_key, val))
+                    values_set.add(val)
 
-    # Если ничего не найдено
-    if not unique_pairs:
+    if not values_set:
         reply = f"❌ Ничего не найдено по запросу `{user_input}`."
     else:
-        # Преобразуем в список для сортировки
-        sorted_pairs = sorted(unique_pairs)
-        # Если результатов слишком много, ограничиваем вывод
-        if len(sorted_pairs) > MAX_RESULTS:
-            sample = sorted_pairs[:PREVIEW_RESULTS]
-            lines = [f"• {key} → {val}" for key, val in sample]
+        sorted_values = sorted(values_set)
+        if len(sorted_values) > MAX_RESULTS:
+            sample = sorted_values[:PREVIEW_RESULTS]
+            lines = [f"• {v}" for v in sample]
             reply = (
                 f"🔍 Найдено более {MAX_RESULTS} результатов. Показаны первые {PREVIEW_RESULTS}:\n"
                 + "\n".join(lines)
-                + f"\n... и ещё {len(sorted_pairs) - PREVIEW_RESULTS}. Уточните запрос."
+                + f"\n... и ещё {len(sorted_values) - PREVIEW_RESULTS}. Уточните запрос."
             )
         else:
-            lines = [f"• {key} → {val}" for key, val in sorted_pairs]
+            lines = [f"• {v}" for v in sorted_values]
             reply = f"🔍 Результаты поиска для `{user_input}`:\n" + "\n".join(lines)
 
     await update.message.reply_text(reply)
