@@ -1,5 +1,6 @@
 import csv
 import os
+import re
 from collections import defaultdict
 from telegram import Update
 from telegram.ext import Application, CommandHandler, MessageHandler, filters, ContextTypes
@@ -22,6 +23,10 @@ def clean_text(s):
 def normalize(s):
     """Удаляет дефисы и приводит к нижнему регистру для сравнения."""
     return s.replace('-', '').lower()
+
+def is_11_digit_number(s):
+    """Проверяет, состоит ли строка ровно из 11 цифр (после удаления дефисов)."""
+    return re.fullmatch(r'\d{11}', s) is not None
 
 # ---------- Загрузка данных из CSV ----------
 # Основные словари: оригинальный ключ -> список значений из другого столбца
@@ -84,11 +89,50 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     # Нормализуем ввод (без дефисов, нижний регистр)
     user_input_norm = normalize(user_input)
-    # Оставляем исходный в нижнем регистре с дефисами для старой логики (может пригодиться)
-    user_input_lower = user_input.lower()
     input_len = len(user_input_norm)
 
-    # ---------- Точный поиск для коротких запросов (< MIN_SEARCH_LENGTH) ----------
+    # ---------- Вспомогательная функция для частичного поиска ----------
+    def partial_search(search_norm):
+        """Выполняет частичный поиск по нормализованному запросу, возвращает col1_results, col2_results."""
+        col1_res = defaultdict(set)
+        col2_res = defaultdict(set)
+
+        # Поиск по первому столбцу (Turbo P/N)
+        for norm_key, original_keys in col1_norm_to_original.items():
+            if search_norm in norm_key:
+                for orig_key in original_keys:
+                    for val in dict_by_col1[orig_key]:
+                        suffix = val.split('-')[-1] if '-' in val else val
+                        col1_res[orig_key].add(suffix)
+
+        # Поиск по второму столбцу (E&E P/N)
+        for norm_key, original_keys in col2_norm_to_original.items():
+            if search_norm in norm_key:
+                for orig_key in original_keys:
+                    for val in dict_by_col2[orig_key]:
+                        suffix = orig_key.split('-')[-1] if '-' in orig_key else orig_key
+                        col2_res[val].add(suffix)
+
+        return col1_res, col2_res
+
+    # ---------- Вспомогательная функция для форматирования результатов ----------
+    def format_results(col1_res, col2_res, search_query, is_replacement=False):
+        lines = []
+        if col1_res:
+            lines.append(f"🔍 По Turbo P/N найдены E&E P/N ({search_query}):")
+            for key in sorted(col1_res.keys()):
+                suffixes = sorted(col1_res[key])
+                lines.append(f"• {key} ({', '.join(suffixes)})")
+        if col2_res:
+            lines.append(f"🔍 По E&E P/N найдены Turbo P/N ({search_query}):")
+            for key in sorted(col2_res.keys()):
+                suffixes = sorted(col2_res[key])
+                lines.append(f"• {key} ({', '.join(suffixes)})")
+        if is_replacement:
+            lines.insert(0, "⚠️ Исходный номер не найден, показаны результаты для 970 вместо средней части.")
+        return "\n".join(lines)
+
+    # ---------- Точный поиск для коротких запросов ----------
     if input_len < MIN_SEARCH_LENGTH:
         # Сначала точное совпадение по второму столбцу (E&E P/N) – ищем по нормализованному ключу
         if user_input_norm in col2_norm_to_original:
@@ -112,40 +156,25 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return
 
     # ---------- Частичный поиск (длина >= MIN_SEARCH_LENGTH) ----------
-    col1_results = defaultdict(set)  # Turbo P/N -> множество суффиксов из E&E P/N (поиск по первому столбцу)
-    col2_results = defaultdict(set)  # E&E P/N -> множество суффиксов из Turbo P/N (поиск по второму столбцу)
-
-    # Поиск по первому столбцу (Turbo P/N) – используем нормализованные ключи для проверки вхождения
-    for norm_key, original_keys in col1_norm_to_original.items():
-        if user_input_norm in norm_key:
-            for orig_key in original_keys:
-                for val in dict_by_col1[orig_key]:
-                    suffix = val.split('-')[-1] if '-' in val else val
-                    col1_results[orig_key].add(suffix)
-
-    # Поиск по второму столбцу (E&E P/N)
-    for norm_key, original_keys in col2_norm_to_original.items():
-        if user_input_norm in norm_key:
-            for orig_key in original_keys:
-                for val in dict_by_col2[orig_key]:
-                    suffix = orig_key.split('-')[-1] if '-' in orig_key else orig_key
-                    col2_results[val].add(suffix)
+    col1_results, col2_results = partial_search(user_input_norm)
 
     if not col1_results and not col2_results:
+        # Ничего не найдено – пробуем заменить среднюю часть на 970, если формат подходит
+        if is_11_digit_number(user_input_norm):
+            first4 = user_input_norm[:4]
+            middle3 = user_input_norm[4:7]
+            last4 = user_input_norm[7:]
+            if middle3 != '970':
+                new_norm = first4 + '970' + last4
+                col1_results_new, col2_results_new = partial_search(new_norm)
+                if col1_results_new or col2_results_new:
+                    reply = format_results(col1_results_new, col2_results_new, user_input, is_replacement=True)
+                    await update.message.reply_text(reply)
+                    return
+        # Если и замена не помогла
         reply = f"❌ Ничего не найдено по запросу `{user_input}`."
     else:
-        lines = []
-        if col1_results:
-            lines.append(f"🔍 По Turbo P/N найдены E&E P/N ({user_input}):")
-            for key in sorted(col1_results.keys()):
-                suffixes = sorted(col1_results[key])
-                lines.append(f"• {key} ({', '.join(suffixes)})")
-        if col2_results:
-            lines.append(f"🔍 По E&E P/N найдены Turbo P/N ({user_input}):")
-            for key in sorted(col2_results.keys()):
-                suffixes = sorted(col2_results[key])
-                lines.append(f"• {key} ({', '.join(suffixes)})")
-        reply = "\n".join(lines)
+        reply = format_results(col1_results, col2_results, user_input, is_replacement=False)
 
     await update.message.reply_text(reply)
 
