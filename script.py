@@ -4,16 +4,11 @@ from telegram import Update
 from telegram.ext import Application, CommandHandler, MessageHandler, filters, ContextTypes
 import os
 
-# Получение токена
+# Попытка получить токен из переменной окружения
 API_TOKEN = os.environ.get('API_TOKEN')
+
 if API_TOKEN is None:
-    try:
-        from bot_token import API_TOKEN
-    except ImportError:
-        raise ValueError(
-            "❌ Токен не найден! Задайте переменную окружения API_TOKEN "
-            "или создайте файл bot_token.py с переменной API_TOKEN."
-        )
+    raise ValueError("❌ Переменная окружения API_TOKEN не задана!")
 # ---------- Очистка текста ----------
 def clean_text(s):
     """Удаляет лишние пробелы, управляющие символы и BOM."""
