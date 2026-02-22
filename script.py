@@ -11,8 +11,8 @@ if API_TOKEN is None:
 
 # ---------- Константы ----------
 MIN_SEARCH_LENGTH = 4          # минимальная длина для частичного поиска
-MAX_RESULTS = 30               # максимальное количество результатов для показа
-PREVIEW_RESULTS = 20            # сколько показать, если результатов больше MAX_RESULTS
+MAX_RESULTS = 30                # максимальное количество результатов для показа
+PREVIEW_RESULTS = 10            # сколько показать, если результатов больше MAX_RESULTS
 
 # ---------- Очистка текста ----------
 def clean_text(s):
@@ -96,39 +96,40 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return
 
     # ---------- Частичный поиск (длина >= MIN_SEARCH_LENGTH) ----------
-    results = []  # список кортежей (тип_столбца, оригинальный_ключ, значение)
+    # Множество для хранения уникальных пар (оригинальный ключ, значение)
+    unique_pairs = set()
 
     # Поиск по первому столбцу (Turbo P/N)
     for key_lower, original_keys in col1_lower_to_original.items():
         if user_input_lower in key_lower:
             for orig_key in original_keys:
                 for val in dict_by_col1[orig_key]:
-                    results.append(("Turbo P/N", orig_key, val))
+                    unique_pairs.add((orig_key, val))
 
     # Поиск по второму столбцу (E&E P/N)
     for key_lower, original_keys in col2_lower_to_original.items():
         if user_input_lower in key_lower:
             for orig_key in original_keys:
                 for val in dict_by_col2[orig_key]:
-                    results.append(("E&E P/N", orig_key, val))
+                    unique_pairs.add((orig_key, val))
 
     # Если ничего не найдено
-    if not results:
+    if not unique_pairs:
         reply = f"❌ Ничего не найдено по запросу `{user_input}`."
     else:
-        # Убираем возможные дубликаты (одинаковые тройки)
-        unique_results = list(set(results))
+        # Преобразуем в список для сортировки
+        sorted_pairs = sorted(unique_pairs)
         # Если результатов слишком много, ограничиваем вывод
-        if len(unique_results) > MAX_RESULTS:
-            sample = unique_results[:PREVIEW_RESULTS]
-            lines = [f"• {key} → {val} ({typ})" for typ, key, val in sample]
+        if len(sorted_pairs) > MAX_RESULTS:
+            sample = sorted_pairs[:PREVIEW_RESULTS]
+            lines = [f"• {key} → {val}" for key, val in sample]
             reply = (
                 f"🔍 Найдено более {MAX_RESULTS} результатов. Показаны первые {PREVIEW_RESULTS}:\n"
                 + "\n".join(lines)
-                + f"\n... и ещё {len(unique_results) - PREVIEW_RESULTS}. Уточните запрос."
+                + f"\n... и ещё {len(sorted_pairs) - PREVIEW_RESULTS}. Уточните запрос."
             )
         else:
-            lines = [f"• {key} → {val} ({typ})" for typ, key, val in unique_results]
+            lines = [f"• {key} → {val}" for key, val in sorted_pairs]
             reply = f"🔍 Результаты поиска для `{user_input}`:\n" + "\n".join(lines)
 
     await update.message.reply_text(reply)
