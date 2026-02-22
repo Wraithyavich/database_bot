@@ -1,30 +1,28 @@
 import csv
+import os
 from collections import defaultdict
 from telegram import Update
 from telegram.ext import Application, CommandHandler, MessageHandler, filters, ContextTypes
-from telegram import Update, MessageEntity
-import os
 
+# ---------- Очистка текста ----------
 def clean_text(s):
-    """Очищает строку от лишних пробелов, управляющих символов и BOM."""
+    """Удаляет лишние пробелы, управляющие символы и BOM."""
     s = s.strip()
     s = s.replace('\r', '').replace('\n', '').replace('\ufeff', '')
-    # заменяем множественные пробелы/табуляции на один пробел (опционально)
-    s = ' '.join(s.split())
-    return s
+    return ' '.join(s.split())
 
-# Словари для двунаправленного поиска
-dict_by_col1 = defaultdict(list)   # ключ = значение первого столбца -> список значений второго
-dict_by_col2 = defaultdict(list)   # ключ = значение второго столбца -> список значений первого
+# ---------- Загрузка данных из CSV ----------
+dict_by_col1 = defaultdict(list)   # ключ = первый столбец -> список значений второго
+dict_by_col2 = defaultdict(list)   # ключ = второй столбец -> список значений первого
 
 try:
     with open('data.csv', mode='r', encoding='utf-8-sig') as file:
-        reader = csv.reader(file, delimiter=';')   # разделитель — точка с запятой
+        reader = csv.reader(file, delimiter=';')
         for row in reader:
             if len(row) >= 2:
                 col1 = clean_text(row[0])
                 col2 = clean_text(row[1])
-                if col1 and col2:                  # пропускаем пустые после очистки
+                if col1 and col2:
                     dict_by_col1[col1].append(col2)
                     dict_by_col2[col2].append(col1)
 except FileNotFoundError:
@@ -33,8 +31,16 @@ except FileNotFoundError:
 
 print(f"✅ Загружено: {len(dict_by_col1)} уникальных ключей в первом столбце, {len(dict_by_col2)} во втором.")
 
+# ---------- Получение токена ----------
+# Токен хранится в отдельном файле bot_token.py, который не попадает в Git
+try:
+    from bot_token import TOKEN
+except ImportError:
+    raise ValueError("❌ Токен не найден! Создайте файл bot_token.py с переменной TOKEN.")
+
+# ---------- Обработчики команд ----------
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    emoji_id = "5247029251940586192"
+    emoji_id = "5247029251940586192"  # ваш ID кастомного эмодзи
     welcome_text = (
         f"<tg-emoji emoji-id=\"{emoji_id}\">😊</tg-emoji> ТУРБОНАЙЗЕР бот приветствует!\n"
         "Введите E&E P/N или Turbo P/N\n\n"
@@ -43,7 +49,6 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text(welcome_text, parse_mode='HTML')
 
 async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Обработчик текстовых сообщений."""
     user_input = clean_text(update.message.text)
 
     if user_input in dict_by_col2:
@@ -57,20 +62,14 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     await update.message.reply_text(reply)
 
-
-
-
+# ---------- Запуск бота ----------
 def main():
-    TOKEN = "8570133049:AAEG_6PoN6KT-vKtz9DVwDr9nOw6ApQJAi0"
-    # Создаём приложение
     app = Application.builder().token(TOKEN).build()
-
-    # Добавляем обработчики
     app.add_handler(CommandHandler("start", start))
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message))
 
-    # Запускаем бота
     print("🚀 Бот запущен и готов к работе...")
     app.run_polling()
+
 if __name__ == '__main__':
     main()
