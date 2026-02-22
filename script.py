@@ -9,6 +9,11 @@ API_TOKEN = os.environ.get('API_TOKEN')
 if API_TOKEN is None:
     raise ValueError("❌ Переменная окружения API_TOKEN не задана!")
 
+# ---------- Константы ----------
+MIN_SEARCH_LENGTH = 4          # минимальная длина для частичного поиска
+MAX_RESULTS = 30               # максимальное количество результатов для показа
+PREVIEW_RESULTS = 10            # сколько показать, если результатов больше MAX_RESULTS
+
 # ---------- Очистка текста ----------
 def clean_text(s):
     """Удаляет лишние пробелы, управляющие символы и BOM."""
@@ -52,38 +57,79 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     welcome_text = (
         f"<tg-emoji emoji-id=\"{emoji_id}\">😊</tg-emoji> ТУРБОНАЙЗЕР бот приветствует!\n"
         "Введите E&E P/N или Turbo P/N\n\n"
-        "Пример: CT-VNT11B или 17201-52010"
+        "Пример: CT-VNT11B или 17201-52010\n\n"
+        f"🔍 Можно искать по части номера (минимум {MIN_SEARCH_LENGTH} символа)."
     )
     await update.message.reply_text(welcome_text, parse_mode='HTML')
 
 async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    # Очищаем ввод и приводим к нижнему регистру для поиска
+    # Очищаем ввод
     user_input = clean_text(update.message.text)
+    if not user_input:
+        await update.message.reply_text("❌ Пустой запрос. Введите номер.")
+        return
+
     user_input_lower = user_input.lower()
+    input_len = len(user_input)
 
-    # Поиск во втором столбце (E&E P/N)
-    if user_input_lower in col2_lower_to_original:
-        # Получаем все оригинальные ключи из второго столбца, соответствующие вводу
-        original_keys = col2_lower_to_original[user_input_lower]
-        values = []
-        for key in original_keys:
-            # dict_by_col2[key] даёт список значений первого столбца
-            values.extend(dict_by_col2[key])
-        # Убираем дубликаты, если вдруг они есть, и сортируем для красоты
-        unique_values = sorted(set(values))
-        reply = f"🔍 Найден E&E P/N для `{user_input}`:\n" + "\n".join(f"• {v}" for v in unique_values)
+    # ---------- Точный поиск для коротких запросов (< MIN_SEARCH_LENGTH) ----------
+    if input_len < MIN_SEARCH_LENGTH:
+        # Сначала точное совпадение по второму столбцу (E&E P/N)
+        if user_input_lower in col2_lower_to_original:
+            original_keys = col2_lower_to_original[user_input_lower]
+            values = []
+            for key in original_keys:
+                values.extend(dict_by_col2[key])
+            unique_values = sorted(set(values))
+            reply = f"🔍 Найден E&E P/N для `{user_input}`:\n" + "\n".join(f"• {v}" for v in unique_values)
+        # Точное совпадение по первому столбцу (Turbo P/N)
+        elif user_input_lower in col1_lower_to_original:
+            original_keys = col1_lower_to_original[user_input_lower]
+            values = []
+            for key in original_keys:
+                values.extend(dict_by_col1[key])
+            unique_values = sorted(set(values))
+            reply = f"🔍 Найден Turbo P/N для `{user_input}`:\n" + "\n".join(f"• {v}" for v in unique_values)
+        else:
+            reply = f"❌ Точное значение не найдено. Для поиска по части номера введите минимум {MIN_SEARCH_LENGTH} символа."
+        await update.message.reply_text(reply)
+        return
 
-    # Поиск в первом столбце (Turbo P/N)
-    elif user_input_lower in col1_lower_to_original:
-        original_keys = col1_lower_to_original[user_input_lower]
-        values = []
-        for key in original_keys:
-            values.extend(dict_by_col1[key])
-        unique_values = sorted(set(values))
-        reply = f"🔍 Найден Turbo P/N для `{user_input}`:\n" + "\n".join(f"• {v}" for v in unique_values)
+    # ---------- Частичный поиск (длина >= MIN_SEARCH_LENGTH) ----------
+    results = []  # список кортежей (тип_столбца, оригинальный_ключ, значение)
 
+    # Поиск по первому столбцу (Turbo P/N)
+    for key_lower, original_keys in col1_lower_to_original.items():
+        if user_input_lower in key_lower:
+            for orig_key in original_keys:
+                for val in dict_by_col1[orig_key]:
+                    results.append(("Turbo P/N", orig_key, val))
+
+    # Поиск по второму столбцу (E&E P/N)
+    for key_lower, original_keys in col2_lower_to_original.items():
+        if user_input_lower in key_lower:
+            for orig_key in original_keys:
+                for val in dict_by_col2[orig_key]:
+                    results.append(("E&E P/N", orig_key, val))
+
+    # Если ничего не найдено
+    if not results:
+        reply = f"❌ Ничего не найдено по запросу `{user_input}`."
     else:
-        reply = "❌ Значение не найдено. Попробуйте другой запрос."
+        # Убираем возможные дубликаты (одинаковые тройки)
+        unique_results = list(set(results))
+        # Если результатов слишком много, ограничиваем вывод
+        if len(unique_results) > MAX_RESULTS:
+            sample = unique_results[:PREVIEW_RESULTS]
+            lines = [f"• {key} → {val} ({typ})" for typ, key, val in sample]
+            reply = (
+                f"🔍 Найдено более {MAX_RESULTS} результатов. Показаны первые {PREVIEW_RESULTS}:\n"
+                + "\n".join(lines)
+                + f"\n... и ещё {len(unique_results) - PREVIEW_RESULTS}. Уточните запрос."
+            )
+        else:
+            lines = [f"• {key} → {val} ({typ})" for typ, key, val in unique_results]
+            reply = f"🔍 Результаты поиска для `{user_input}`:\n" + "\n".join(lines)
 
     await update.message.reply_text(reply)
 
