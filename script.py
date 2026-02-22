@@ -5,14 +5,6 @@ from telegram.ext import Application, CommandHandler, MessageHandler, filters, C
 from telegram import Update, MessageEntity
 import os
 
-# Получаем токен из переменной окружения (для сервера) или из файла (для локальной разработки)
-try:
-    TOKEN = os.environ['TELEGRAM_TOKEN']
-except KeyError:
-    try:
-        from bot_token import TOKEN
-    except ImportError:
-        raise ValueError("Токен не найден! Задайте переменную окружения TELEGRAM_TOKEN или создайте файл bot_token.py")
 def clean_text(s):
     """Очищает строку от лишних пробелов, управляющих символов и BOM."""
     s = s.strip()
@@ -69,6 +61,7 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 
 def main():
+    TOKEN = "8570133049:AAEG_6PoN6KT-vKtz9DVwDr9nOw6ApQJAi0"
     # Создаём приложение
     app = Application.builder().token(TOKEN).build()
 
