@@ -38,11 +38,8 @@ try:
                 col1 = clean_text(row[0])
                 col2 = clean_text(row[1])
                 if col1 and col2:
-                    # Заполняем основные словари
                     dict_by_col1[col1].append(col2)
                     dict_by_col2[col2].append(col1)
-
-                    # Заполняем словари для поиска по нижнему регистру
                     col1_lower_to_original[col1.lower()].append(col1)
                     col2_lower_to_original[col2.lower()].append(col2)
 except FileNotFoundError:
@@ -53,7 +50,7 @@ print(f"✅ Загружено: {len(dict_by_col1)} уникальных клю�
 
 # ---------- Обработчики команд ----------
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    emoji_id = "5247029251940586192"  # ваш ID кастомного эмодзи
+    emoji_id = "5247029251940586192"
     welcome_text = (
         f"<tg-emoji emoji-id=\"{emoji_id}\">😊</tg-emoji> ТУРБОНАЙЗЕР бот приветствует!\n"
         "Введите E&E P/N или Turbo P/N\n\n"
@@ -63,7 +60,6 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text(welcome_text, parse_mode='HTML')
 
 async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    # Очищаем ввод
     user_input = clean_text(update.message.text)
     if not user_input:
         await update.message.reply_text("❌ Пустой запрос. Введите номер.")
@@ -72,9 +68,8 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_input_lower = user_input.lower()
     input_len = len(user_input)
 
-    # ---------- Точный поиск для коротких запросов (< MIN_SEARCH_LENGTH) ----------
+    # ---------- Точный поиск для коротких запросов ----------
     if input_len < MIN_SEARCH_LENGTH:
-        # Сначала точное совпадение по второму столбцу (E&E P/N)
         if user_input_lower in col2_lower_to_original:
             original_keys = col2_lower_to_original[user_input_lower]
             values = []
@@ -82,7 +77,6 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 values.extend(dict_by_col2[key])
             unique_values = sorted(set(values))
             reply = f"🔍 Найден E&E P/N для `{user_input}`:\n" + "\n".join(f"• {v}" for v in unique_values)
-        # Точное совпадение по первому столбцу (Turbo P/N)
         elif user_input_lower in col1_lower_to_original:
             original_keys = col1_lower_to_original[user_input_lower]
             values = []
@@ -95,39 +89,51 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text(reply)
         return
 
-    # ---------- Частичный поиск (длина >= MIN_SEARCH_LENGTH) ----------
-    # Множество для уникальных значений из противоположного столбца
-    values_set = set()
+    # ---------- Частичный поиск ----------
+    # Словарь для результатов из второго столбца: значение первого столбца -> множество суффиксов
+    col2_results = defaultdict(set)
+    # Множество для результатов из первого столбца (значения второго столбца)
+    col1_results = set()
 
-    # Поиск по первому столбцу (Turbo P/N) – нашли ключ, берём значения из второго столбца
+    # Поиск по второму столбцу (E&E P/N)
+    for key_lower, original_keys in col2_lower_to_original.items():
+        if user_input_lower in key_lower:
+            for orig_key in original_keys:
+                # Извлекаем суффикс (часть после последнего дефиса)
+                suffix = orig_key.split('-')[-1] if '-' in orig_key else ''
+                for val in dict_by_col2[orig_key]:
+                    col2_results[val].add(suffix)
+
+    # Поиск по первому столбцу (Turbo P/N)
     for key_lower, original_keys in col1_lower_to_original.items():
         if user_input_lower in key_lower:
             for orig_key in original_keys:
                 for val in dict_by_col1[orig_key]:
-                    values_set.add(val)
+                    col1_results.add(val)
 
-    # Поиск по второму столбцу (E&E P/N) – нашли ключ, берём значения из первого столбца
-    for key_lower, original_keys in col2_lower_to_original.items():
-        if user_input_lower in key_lower:
-            for orig_key in original_keys:
-                for val in dict_by_col2[orig_key]:
-                    values_set.add(val)
+    # Формируем ответ
+    lines = []
+    if col2_results:
+        lines.append("🔍 По E&E P/N найдены Turbo P/N (суффиксы):")
+        for val in sorted(col2_results.keys()):
+            suffixes = sorted(col2_results[val])
+            suffix_str = ", ".join(suffixes)
+            lines.append(f"• {val} ({suffix_str})")
+    if col1_results:
+        lines.append("🔍 По Turbo P/N найдены E&E P/N:")
+        for val in sorted(col1_results):
+            lines.append(f"• {val}")
 
-    if not values_set:
+    if not lines:
         reply = f"❌ Ничего не найдено по запросу `{user_input}`."
     else:
-        sorted_values = sorted(values_set)
-        if len(sorted_values) > MAX_RESULTS:
-            sample = sorted_values[:PREVIEW_RESULTS]
-            lines = [f"• {v}" for v in sample]
-            reply = (
-                f"🔍 Найдено более {MAX_RESULTS} результатов. Показаны первые {PREVIEW_RESULTS}:\n"
-                + "\n".join(lines)
-                + f"\n... и ещё {len(sorted_values) - PREVIEW_RESULTS}. Уточните запрос."
-            )
+        # Простая проверка на слишком длинный ответ (можно добавить ограничение)
+        if len(lines) > MAX_RESULTS * 2:  # грубо
+            # Обрежем до PREVIEW_RESULTS строк, но лучше обработать обе секции
+            preview_lines = lines[:PREVIEW_RESULTS]
+            reply = "\n".join(preview_lines) + f"\n... и ещё {len(lines) - PREVIEW_RESULTS}. Уточните запрос."
         else:
-            lines = [f"• {v}" for v in sorted_values]
-            reply = f"🔍 Результаты поиска для `{user_input}`:\n" + "\n".join(lines)
+            reply = "\n".join(lines)
 
     await update.message.reply_text(reply)
 
