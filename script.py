@@ -17,8 +17,13 @@ def clean_text(s):
     return ' '.join(s.split())
 
 # ---------- Загрузка данных из CSV ----------
-dict_by_col1 = defaultdict(list)   # ключ = первый столбец -> список значений второго
-dict_by_col2 = defaultdict(list)   # ключ = второй столбец -> список значений первого
+# Основные словари: оригинальный ключ -> список значений из другого столбца
+dict_by_col1 = defaultdict(list)   # первый столбец (оригинал) -> список значений второго
+dict_by_col2 = defaultdict(list)   # второй столбец (оригинал) -> список значений первого
+
+# Словари для поиска без учёта регистра: ключ в нижнем регистре -> список оригинальных ключей
+col1_lower_to_original = defaultdict(list)
+col2_lower_to_original = defaultdict(list)
 
 try:
     with open('data.csv', mode='r', encoding='utf-8-sig') as file:
@@ -28,8 +33,13 @@ try:
                 col1 = clean_text(row[0])
                 col2 = clean_text(row[1])
                 if col1 and col2:
+                    # Заполняем основные словари
                     dict_by_col1[col1].append(col2)
                     dict_by_col2[col2].append(col1)
+
+                    # Заполняем словари для поиска по нижнему регистру
+                    col1_lower_to_original[col1.lower()].append(col1)
+                    col2_lower_to_original[col2.lower()].append(col2)
 except FileNotFoundError:
     print("❌ Файл data.csv не найден! Поместите его в папку со скриптом.")
     exit(1)
@@ -47,14 +57,31 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text(welcome_text, parse_mode='HTML')
 
 async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    # Очищаем ввод и приводим к нижнему регистру для поиска
     user_input = clean_text(update.message.text)
+    user_input_lower = user_input.lower()
 
-    if user_input in dict_by_col2:
-        values = dict_by_col2[user_input]
-        reply = f"🔍 Найден E&E P/N для `{user_input}`:\n" + "\n".join(f"• {v}" for v in values)
-    elif user_input in dict_by_col1:
-        values = dict_by_col1[user_input]
-        reply = f"🔍 Найден Turbo P/N для `{user_input}`:\n" + "\n".join(f"• {v}" for v in values)
+    # Поиск во втором столбце (E&E P/N)
+    if user_input_lower in col2_lower_to_original:
+        # Получаем все оригинальные ключи из второго столбца, соответствующие вводу
+        original_keys = col2_lower_to_original[user_input_lower]
+        values = []
+        for key in original_keys:
+            # dict_by_col2[key] даёт список значений первого столбца
+            values.extend(dict_by_col2[key])
+        # Убираем дубликаты, если вдруг они есть, и сортируем для красоты
+        unique_values = sorted(set(values))
+        reply = f"🔍 Найден E&E P/N для `{user_input}`:\n" + "\n".join(f"• {v}" for v in unique_values)
+
+    # Поиск в первом столбце (Turbo P/N)
+    elif user_input_lower in col1_lower_to_original:
+        original_keys = col1_lower_to_original[user_input_lower]
+        values = []
+        for key in original_keys:
+            values.extend(dict_by_col1[key])
+        unique_values = sorted(set(values))
+        reply = f"🔍 Найден Turbo P/N для `{user_input}`:\n" + "\n".join(f"• {v}" for v in unique_values)
+
     else:
         reply = "❌ Значение не найдено. Попробуйте другой запрос."
 
