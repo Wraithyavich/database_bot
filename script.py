@@ -116,7 +116,7 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return col1_res, col2_res
 
     # ---------- Вспомогательная функция для форматирования результатов ----------
-    def format_results(col1_res, col2_res, search_query, is_replacement=False):
+    def format_results(col1_res, col2_res, search_query):
         lines = []
         if col1_res:
             lines.append(f"🔍 По Turbo P/N найдены E&E P/N ({search_query}):")
@@ -128,8 +128,6 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
             for key in sorted(col2_res.keys()):
                 suffixes = sorted(col2_res[key])
                 lines.append(f"• {key} ({', '.join(suffixes)})")
-        if is_replacement:
-            lines.insert(0, "⚠️ Исходный номер не найден, показаны результаты для 970 вместо средней части.")
         return "\n".join(lines)
 
     # ---------- Точный поиск для коротких запросов ----------
@@ -168,13 +166,13 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 new_norm = first4 + '970' + last4
                 col1_results_new, col2_results_new = partial_search(new_norm)
                 if col1_results_new or col2_results_new:
-                    reply = format_results(col1_results_new, col2_results_new, user_input, is_replacement=True)
+                    reply = format_results(col1_results_new, col2_results_new, user_input)
                     await update.message.reply_text(reply)
                     return
         # Если и замена не помогла
         reply = f"❌ Ничего не найдено по запросу `{user_input}`."
     else:
-        reply = format_results(col1_results, col2_results, user_input, is_replacement=False)
+        reply = format_results(col1_results, col2_results, user_input)
 
     await update.message.reply_text(reply)
 
