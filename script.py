@@ -1,9 +1,19 @@
 import csv
-import os
 from collections import defaultdict
 from telegram import Update
 from telegram.ext import Application, CommandHandler, MessageHandler, filters, ContextTypes
+import os
 
+# Получение токена
+API_TOKEN = os.environ.get('API_TOKEN')
+if API_TOKEN is None:
+    try:
+        from bot_token import API_TOKEN
+    except ImportError:
+        raise ValueError(
+            "❌ Токен не найден! Задайте переменную окружения API_TOKEN "
+            "или создайте файл bot_token.py с переменной API_TOKEN."
+        )
 # ---------- Очистка текста ----------
 def clean_text(s):
     """Удаляет лишние пробелы, управляющие символы и BOM."""
@@ -64,7 +74,7 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 # ---------- Запуск бота ----------
 def main():
-    app = Application.builder().token(TOKEN).build()
+    app = Application.builder().token(API_TOKEN).build()
     app.add_handler(CommandHandler("start", start))
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message))
 
