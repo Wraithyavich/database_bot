@@ -1,14 +1,14 @@
 import csv
+import os
 from collections import defaultdict
 from telegram import Update
 from telegram.ext import Application, CommandHandler, MessageHandler, filters, ContextTypes
-import os
 
-# Попытка получить токен из переменной окружения
+# ---------- Получение токена из переменной окружения ----------
 API_TOKEN = os.environ.get('API_TOKEN')
-
 if API_TOKEN is None:
     raise ValueError("❌ Переменная окружения API_TOKEN не задана!")
+
 # ---------- Очистка текста ----------
 def clean_text(s):
     """Удаляет лишние пробелы, управляющие символы и BOM."""
@@ -35,13 +35,6 @@ except FileNotFoundError:
     exit(1)
 
 print(f"✅ Загружено: {len(dict_by_col1)} уникальных ключей в первом столбце, {len(dict_by_col2)} во втором.")
-
-# ---------- Получение токена ----------
-# Токен хранится в отдельном файле bot_token.py, который не попадает в Git
-try:
-    from bot_token import TOKEN
-except ImportError:
-    raise ValueError("❌ Токен не найден! Создайте файл bot_token.py с переменной TOKEN.")
 
 # ---------- Обработчики команд ----------
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
