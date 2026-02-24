@@ -2,7 +2,7 @@ import csv
 import os
 import re
 from collections import defaultdict
-from telegram import Update, ReplyKeyboardMarkup, KeyboardButton
+from telegram import Update
 from telegram.ext import Application, CommandHandler, MessageHandler, filters, ContextTypes
 
 # ---------- Получение токена из переменной окружения ----------
@@ -74,11 +74,6 @@ def partial_search(search_norm):
 
     return results
 
-# ---------- Клавиатура ----------
-def get_menu_keyboard():
-    keyboard = [[KeyboardButton("Меню")]]
-    return ReplyKeyboardMarkup(keyboard, resize_keyboard=True)
-
 # ---------- Обработчики ----------
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     emoji_id = "5247029251940586192"  # ваш ID кастомного эмодзи (можно убрать)
@@ -89,14 +84,9 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
         f"🔍 Можно искать по части номера (минимум {MIN_SEARCH_LENGTH} символа).\n"
         "Дефисы можно не ставить – бот поймёт."
     )
-    await update.message.reply_text(welcome_text, parse_mode='HTML', reply_markup=get_menu_keyboard())
+    await update.message.reply_text(welcome_text, parse_mode='HTML')
 
 async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    # Если пользователь нажал "Меню", вызываем start
-    if update.message.text.strip() == "Меню":
-        await start(update, context)
-        return
-
     # Очищаем ввод
     user_input = clean_text(update.message.text)
     if not user_input:
@@ -124,7 +114,7 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
             reply = f"🔍 Найден Turbo P/N для `{user_input}`:\n" + "\n".join(f"• {v}" for v in sorted(values))
         else:
             reply = f"❌ Точное значение не найдено. Для поиска по части номера введите минимум {MIN_SEARCH_LENGTH} символа."
-        await update.message.reply_text(reply, reply_markup=get_menu_keyboard())
+        await update.message.reply_text(reply)
         return
 
     # ---------- Частичный поиск (длина >= MIN_SEARCH_LENGTH) ----------
@@ -141,25 +131,23 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
             if results:
                 lines = [f"• {v}" for v in sorted(results)]
                 reply = f"🔍 Результаты для `{user_input}`:\n" + "\n".join(lines)
-                await update.message.reply_text(reply, reply_markup=get_menu_keyboard())
+                await update.message.reply_text(reply)
                 return
 
     if not results:
         reply = f"❌ Ничего не найдено по запросу `{user_input}`."
     else:
-        # Группируем по Turbo P/N с суффиксами? Но в первом боте мы выводим просто список Turbo P/N.
-        # По предыдущим версиям мы выводили уникальные Turbo P/N.
         lines = [f"• {v}" for v in sorted(results)]
         reply = f"🔍 Результаты поиска для `{user_input}`:\n" + "\n".join(lines)
 
-    await update.message.reply_text(reply, reply_markup=get_menu_keyboard())
+    await update.message.reply_text(reply)
 
 def main():
     app = Application.builder().token(API_TOKEN).build()
     app.add_handler(CommandHandler("start", start))
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message))
 
-    print("🚀 ТУРБОНАЙЗЕР бот с кнопкой Меню запущен...")
+    print("🚀 ТУРБОНАЙЗЕР бот запущен...")
     app.run_polling()
 
 if __name__ == '__main__':
