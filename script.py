@@ -12,6 +12,8 @@ if API_TOKEN is None:
 
 # ---------- Константы ----------
 MIN_SEARCH_LENGTH = 4
+DATA_FILE = 'data.csv'
+JRONE_FILE = 'jronecross.csv'
 
 # ---------- Очистка текста ----------
 def clean_text(s):
@@ -26,17 +28,14 @@ def normalize(s):
 def is_11_digit_number(s):
     return re.fullmatch(r'\d{11}', s) is not None
 
-# ---------- Загрузка данных из CSV ----------
-# Основные словари: оригинальный ключ -> список значений из другого столбца
+# ---------- Загрузка основной базы (data.csv) ----------
 dict_by_col1 = defaultdict(list)   # Turbo P/N -> список E&E P/N
 dict_by_col2 = defaultdict(list)   # E&E P/N -> список Turbo P/N
-
-# Словари для поиска по нормализованным ключам (без дефисов, нижний регистр)
-col1_norm_to_original = defaultdict(list)   # нормализованный Turbo -> оригиналы
-col2_norm_to_original = defaultdict(list)   # нормализованный E&E -> оригиналы
+col1_norm_to_original = defaultdict(list)  # нормализованный Turbo -> оригиналы
+col2_norm_to_original = defaultdict(list)  # нормализованный E&E -> оригиналы
 
 try:
-    with open('data.csv', mode='r', encoding='utf-8-sig') as file:
+    with open(DATA_FILE, mode='r', encoding='utf-8-sig') as file:
         reader = csv.reader(file, delimiter=';')
         for row in reader:
             if len(row) >= 2:
@@ -51,36 +50,60 @@ except FileNotFoundError:
     print("❌ Файл data.csv не найден! Поместите его в папку со скриптом.")
     exit(1)
 
-print(f"✅ Загружено: {len(dict_by_col1)} уникальных Turbo P/N, {len(dict_by_col2)} уникальных E&E P/N.")
+print(f"✅ Основная база: {len(dict_by_col1)} Turbo P/N, {len(dict_by_col2)} E&E P/N.")
 
-# ---------- Функция для частичного поиска ----------
-def partial_search(search_norm):
-    """Выполняет частичный поиск по нормализованному запросу, возвращает множество Turbo P/N."""
+# ---------- Загрузка базы JRN-кроссов (jronecross.csv) ----------
+# Структура: jrone;наша_номер;наша_номенклатура
+jrone_norm_to_art = defaultdict(set)   # нормализованный JRN-номер -> множество наших артикулов
+jrone_original_info = {}                # оригинальный JRN-номер -> (наша_номер, наша_номенклатура) – для возможного вывода
+
+try:
+    with open(JRONE_FILE, mode='r', encoding='utf-8-sig') as file:
+        reader = csv.reader(file, delimiter=';')
+        for row in reader:
+            if len(row) >= 3:
+                jrone = clean_text(row[0])
+                our_number = clean_text(row[1])
+                our_art = clean_text(row[2])
+                if jrone and our_art:
+                    norm = normalize(jrone)
+                    jrone_norm_to_art[norm].add(our_art)
+                    # сохраняем оригинальную информацию для возможного использования
+                    if jrone not in jrone_original_info:
+                        jrone_original_info[jrone] = []
+                    jrone_original_info[jrone].append((our_number, our_art))
+except FileNotFoundError:
+    print("⚠️ Файл jronecross.csv не найден, поиск по JRN-номерам недоступен.")
+except Exception as e:
+    print(f"❌ Ошибка загрузки {JRONE_FILE}: {e}")
+
+print(f"✅ JRN-база: {len(jrone_norm_to_art)} уникальных нормализованных JRN-номеров.")
+
+# ---------- Функция частичного поиска в основной базе ----------
+def partial_search_main(search_norm):
+    """Возвращает множество Turbo P/N, соответствующих частичному совпадению в основной базе."""
     results = set()
-
     # Поиск по первому столбцу (Turbo P/N) – нашли ключ, берём значения из второго столбца
     for norm_key, original_keys in col1_norm_to_original.items():
         if search_norm in norm_key:
             for orig_key in original_keys:
                 for val in dict_by_col1[orig_key]:
                     results.add(val)
-
     # Поиск по второму столбцу (E&E P/N) – нашли ключ, берём значения из первого столбца
     for norm_key, original_keys in col2_norm_to_original.items():
         if search_norm in norm_key:
             for orig_key in original_keys:
                 for val in dict_by_col2[orig_key]:
                     results.add(val)
-
     return results
 
 # ---------- Обработчики ----------
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    emoji_id = "5247029251940586192"  # ваш ID кастомного эмодзи (можно убрать)
+    emoji_id = "5247029251940586192"
     welcome_text = (
         f"<tg-emoji emoji-id=\"{emoji_id}\">😊</tg-emoji> ТУРБОНАЙЗЕР бот приветствует!\n"
-        "Введите E&E P/N или Turbo P/N\n\n"
-        "Пример: CT-VNT11B или 17201-52010\n\n"
+        "Введите E&E P/N, Turbo P/N или JRN-номер\n\n"
+        "Пример: CT-VNT11B или 17201-52010 или JRN-12345\n\n"
         f"🔍 Можно искать по части номера (минимум {MIN_SEARCH_LENGTH} символа).\n"
         "Дефисы можно не ставить – бот поймёт."
     )
@@ -92,20 +115,49 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not user_input:
         return
 
-    # Нормализуем ввод (без дефисов, нижний регистр)
     user_input_norm = normalize(user_input)
     input_len = len(user_input_norm)
 
-    # ---------- Точный поиск для коротких запросов (< MIN_SEARCH_LENGTH) ----------
+    # ---------- 1. Поиск по JRN-базе ----------
+    jrone_arts = set()
     if input_len < MIN_SEARCH_LENGTH:
-        # Сначала точное совпадение по второму столбцу (E&E P/N)
+        # Точный поиск в JRN-базе
+        if user_input_norm in jrone_norm_to_art:
+            jrone_arts = jrone_norm_to_art[user_input_norm]
+    else:
+        # Частичный поиск в JRN-базе
+        for norm_key, arts in jrone_norm_to_art.items():
+            if user_input_norm in norm_key:
+                jrone_arts.update(arts)
+
+    if jrone_arts:
+        # Найдены артикулы по JRN-номеру
+        lines = []
+        for art in sorted(jrone_arts):
+            if art in dict_by_col1:
+                # Артикул найден в основной базе – показываем связанные E&E номера
+                eee_list = sorted(set(dict_by_col1[art]))
+                lines.append(f"• {art} → {', '.join(eee_list)}")
+            elif art in dict_by_col2:
+                # Возможно, артикул является E&E – покажем связанные Turbo
+                turbo_list = sorted(set(dict_by_col2[art]))
+                lines.append(f"• {art} → {', '.join(turbo_list)}")
+            else:
+                # Артикул есть только в JRN-базе, но не в основной
+                lines.append(f"• {art} (нет в основной базе)")
+        reply = f"🔍 По JRN-номеру `{user_input}` найдены артикулы:\n" + "\n".join(lines)
+        await update.message.reply_text(reply)
+        return
+
+    # ---------- 2. Поиск в основной базе (как раньше) ----------
+    if input_len < MIN_SEARCH_LENGTH:
+        # Точный поиск
         if user_input_norm in col2_norm_to_original:
             original_keys = col2_norm_to_original[user_input_norm]
             values = set()
             for key in original_keys:
                 values.update(dict_by_col2[key])
             reply = f"🔍 Найден E&E P/N для `{user_input}`:\n" + "\n".join(f"• {v}" for v in sorted(values))
-        # Точное совпадение по первому столбцу (Turbo P/N)
         elif user_input_norm in col1_norm_to_original:
             original_keys = col1_norm_to_original[user_input_norm]
             values = set()
@@ -117,8 +169,8 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text(reply)
         return
 
-    # ---------- Частичный поиск (длина >= MIN_SEARCH_LENGTH) ----------
-    results = partial_search(user_input_norm)
+    # Частичный поиск в основной базе
+    results = partial_search_main(user_input_norm)
 
     # Если ничего не найдено, пробуем заменить среднюю часть на 970 для 11-значных номеров
     if not results and is_11_digit_number(user_input_norm):
@@ -127,7 +179,7 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
         last4 = user_input_norm[7:]
         if middle3 != '970':
             new_norm = first4 + '970' + last4
-            results = partial_search(new_norm)
+            results = partial_search_main(new_norm)
             if results:
                 lines = [f"• {v}" for v in sorted(results)]
                 reply = f"🔍 Результаты для `{user_input}`:\n" + "\n".join(lines)
@@ -147,7 +199,7 @@ def main():
     app.add_handler(CommandHandler("start", start))
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message))
 
-    print("🚀 ТУРБОНАЙЗЕР бот запущен...")
+    print("🚀 ТУРБОНАЙЗЕР бот с JRN-кроссами запущен...")
     app.run_polling()
 
 if __name__ == '__main__':
