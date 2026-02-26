@@ -55,13 +55,14 @@ import requests
 
 def get_turbo_by_vin(vin):
     try:
-        response = requests.get(f"http://vin-parser:3000/search?vin={vin}", timeout=10)
+        url = f"http://vin-parser:3000/search?vin={vin}"
+        response = requests.get(url, timeout=15)
         if response.status_code == 200:
-            data = response.json()
-            return data.get("articles", [])
+            return response.json().get("articles", [])
         else:
             return []
-    except:
+    except Exception as e:
+        print(f"Ошибка при вызове vin-parser: {e}")
         return []
 # ---------- Загрузка основной базы (data.csv) ----------
 dict_by_col1 = defaultdict(list)   # Turbo P/N -> список E&E P/N
