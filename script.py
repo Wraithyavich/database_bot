@@ -51,6 +51,18 @@ def normalize(s):
 def is_11_digit_number(s):
     return re.fullmatch(r'\d{11}', s) is not None
 
+import requests
+
+def get_turbo_by_vin(vin):
+    try:
+        response = requests.get(f"http://vin-parser:3000/search?vin={vin}", timeout=10)
+        if response.status_code == 200:
+            data = response.json()
+            return data.get("articles", [])
+        else:
+            return []
+    except:
+        return []
 # ---------- Загрузка основной базы (data.csv) ----------
 dict_by_col1 = defaultdict(list)   # Turbo P/N -> список E&E P/N
 dict_by_col2 = defaultdict(list)   # E&E P/N -> список Turbo P/N
