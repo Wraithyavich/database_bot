@@ -1,7 +1,6 @@
 import csv
 import os
 import re
-import requests
 from collections import defaultdict
 from telegram import Update
 from telegram.ext import Application, CommandHandler, MessageHandler, filters, ContextTypes
@@ -44,34 +43,15 @@ def replace_cyrillic_like_latin(s):
 
 def normalize(s):
     """Удаляет дефисы, приводит к нижнему регистру, предварительно заменяя кириллицу."""
+    # Сначала заменяем кириллические символы на латиницу
     s = replace_cyrillic_like_latin(s)
+    # Удаляем дефисы и переводим в нижний регистр
     return s.replace('-', '').lower()
 
 def is_11_digit_number(s):
     return re.fullmatch(r'\d{11}', s) is not None
 
-# ---------- Взаимодействие с третьим ботом (парсер VIN) ----------
-def get_turbo_by_vin(vin):
-    try:
-        # Третий бот доступен по внутреннему адресу vin-parser на порту 3000
-        url = f"http://vin-parser:3000/search?vin={vin}"
-        response = requests.get(url, timeout=15)
-        if response.status_code == 200:
-            return response.json().get("articles", [])
-        else:
-            return []
-    except Exception as e:
-        print(f"Ошибка при вызове vin-parser: {e}")
-        return []
 
-async def ping_vin(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Команда для проверки связи с третьим ботом."""
-    try:
-        url = "http://vin-parser:3000/search?vin=TEST123"
-        response = requests.get(url, timeout=5)
-        await update.message.reply_text(f"Статус: {response.status_code}")
-    except Exception as e:
-        await update.message.reply_text(f"Ошибка: {e}")
 
 # ---------- Загрузка основной базы (data.csv) ----------
 dict_by_col1 = defaultdict(list)   # Turbo P/N -> список E&E P/N
@@ -98,8 +78,9 @@ except FileNotFoundError:
 print(f"✅ Основная база: {len(dict_by_col1)} Turbo P/N, {len(dict_by_col2)} E&E P/N.")
 
 # ---------- Загрузка базы JRN-кроссов (jronecross.csv) ----------
-jrone_norm_to_art = defaultdict(set)
-jrone_original_info = {}
+# Структура: jrone;наша_номер;наша_номенклатура
+jrone_norm_to_art = defaultdict(set)   # нормализованный JRN-номер -> множество наших артикулов
+jrone_original_info = {}                # оригинальный JRN-номер -> (наша_номер, наша_номенклатура) – для возможного вывода
 
 try:
     with open(JRONE_FILE, mode='r', encoding='utf-8-sig') as file:
@@ -112,6 +93,7 @@ try:
                 if jrone and our_art:
                     norm = normalize(jrone)
                     jrone_norm_to_art[norm].add(our_art)
+                    # сохраняем оригинальную информацию для возможного использования
                     if jrone not in jrone_original_info:
                         jrone_original_info[jrone] = []
                     jrone_original_info[jrone].append((our_number, our_art))
@@ -124,12 +106,15 @@ print(f"✅ JRN-база: {len(jrone_norm_to_art)} уникальных норм
 
 # ---------- Функция частичного поиска в основной базе ----------
 def partial_search_main(search_norm):
+    """Возвращает множество Turbo P/N, соответствующих частичному совпадению в основной базе."""
     results = set()
+    # Поиск по первому столбцу (Turbo P/N) – нашли ключ, берём значения из второго столбца
     for norm_key, original_keys in col1_norm_to_original.items():
         if search_norm in norm_key:
             for orig_key in original_keys:
                 for val in dict_by_col1[orig_key]:
                     results.add(val)
+    # Поиск по второму столбцу (E&E P/N) – нашли ключ, берём значения из первого столбца
     for norm_key, original_keys in col2_norm_to_original.items():
         if search_norm in norm_key:
             for orig_key in original_keys:
@@ -146,61 +131,53 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "Пример: CT-VNT11B или 17201-52010\n\n"
         f"🔍 Можно искать по части номера (минимум {MIN_SEARCH_LENGTH} символа).\n"
         "Дефисы можно не ставить – бот поймёт.\n"
-        "Также бот понимает русские буквы, похожие на латинские (например, Е = E, Н = H).\n"
-       # "Если ввести VIN-номер (17 символов), бот попытается найти артикулы турбин через внешний сервис."
+        "Также бот понимает русские буквы, похожие на латинские (например, Е = E, Н = H)."
     )
     await update.message.reply_text(welcome_text, parse_mode='HTML')
 
 async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    # Очищаем ввод
     user_input = clean_text(update.message.text)
     if not user_input:
         return
 
-    # ---- Проверка на VIN (очищенный от лишних символов) ----
-    vin_cleaned = re.sub(r'[^A-Za-z0-9]', '', user_input)
-    if len(vin_cleaned) == 17 and re.search(r'[A-Za-z]', vin_cleaned) and re.search(r'\d', vin_cleaned):
-        articles = get_turbo_by_vin(vin_cleaned)
-        if articles:
-            await update.message.reply_text(
-                f"🔍 По VIN найдены артикулы турбин:\n" + "\n".join(f"• {a}" for a in articles)
-            )
-            return
-        #else:
-            # Если ничего не найдено – просто покажем сообщение и продолжим обычный поиск (опционально можно прервать)
-            #await update.message.reply_text("❌ По данному VIN ничего не найдено. Пробую поиск по локальным базам...")
-            # Не выходим, чтобы попробовать поиск по базам
-
-    # ---- Основной поиск по базам ----
     user_input_norm = normalize(user_input)
     input_len = len(user_input_norm)
 
-    # Поиск по JRN-базе
+    # ---------- 1. Поиск по JRN-базе ----------
     jrone_arts = set()
     if input_len < MIN_SEARCH_LENGTH:
+        # Точный поиск в JRN-базе
         if user_input_norm in jrone_norm_to_art:
             jrone_arts = jrone_norm_to_art[user_input_norm]
     else:
+        # Частичный поиск в JRN-базе
         for norm_key, arts in jrone_norm_to_art.items():
             if user_input_norm in norm_key:
                 jrone_arts.update(arts)
 
     if jrone_arts:
+        # Найдены артикулы по JRN-номеру
         lines = []
         for art in sorted(jrone_arts):
             if art in dict_by_col1:
+                # Артикул найден в основной базе – показываем связанные E&E номера
                 eee_list = sorted(set(dict_by_col1[art]))
                 lines.append(f"• {art} → {', '.join(eee_list)}")
             elif art in dict_by_col2:
+                # Возможно, артикул является E&E – покажем связанные Turbo
                 turbo_list = sorted(set(dict_by_col2[art]))
                 lines.append(f"• {art} → {', '.join(turbo_list)}")
             else:
+                # Артикул есть только в JRN-базе, но не в основной
                 lines.append(f"• {art} (нет в основной базе)")
         reply = f"🔍 По JRN-номеру `{user_input}` найдены артикулы:\n" + "\n".join(lines)
         await update.message.reply_text(reply)
         return
 
-    # Поиск в основной базе
+    # ---------- 2. Поиск в основной базе (как раньше) ----------
     if input_len < MIN_SEARCH_LENGTH:
+        # Точный поиск
         if user_input_norm in col2_norm_to_original:
             original_keys = col2_norm_to_original[user_input_norm]
             values = set()
@@ -218,7 +195,7 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text(reply)
         return
 
-    # Частичный поиск
+    # Частичный поиск в основной базе
     results = partial_search_main(user_input_norm)
 
     # Если ничего не найдено, пробуем заменить среднюю часть на 970 для 11-значных номеров
@@ -246,10 +223,9 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
 def main():
     app = Application.builder().token(API_TOKEN).build()
     app.add_handler(CommandHandler("start", start))
-    app.add_handler(CommandHandler("ping_vin", ping_vin))  # команда для проверки связи с третьим ботом
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message))
 
-    print("🚀 ТУРБОНАЙЗЕР бот с JRN-кроссами ...")
+    print("🚀 ТУРБОНАЙЗЕР бот с JRN-кроссами и коррекцией раскладки запущен...")
     app.run_polling()
 
 if __name__ == '__main__':
