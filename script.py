@@ -64,6 +64,16 @@ def get_turbo_by_vin(vin):
     except Exception as e:
         print(f"Ошибка при вызове vin-parser: {e}")
         return []
+
+async def ping_vin(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    try:
+        url = "http://vin-parser:3000/search?vin=TEST123"
+        response = requests.get(url, timeout=5)
+        await update.message.reply_text(f"Статус: {response.status_code}")
+    except Exception as e:
+        await update.message.reply_text(f"Ошибка: {e}")
+
+
 # ---------- Загрузка основной базы (data.csv) ----------
 dict_by_col1 = defaultdict(list)   # Turbo P/N -> список E&E P/N
 dict_by_col2 = defaultdict(list)   # E&E P/N -> список Turbo P/N
