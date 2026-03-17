@@ -15,7 +15,7 @@ MIN_SEARCH_LENGTH = 4
 DATA_FILE = 'data.csv'
 JRONE_FILE = 'jronecross.csv'
 OEM_FILE = 'oemcross.csv'
-FLP_FILE = 'flp.csv'          # новый файл FLP-кроссов
+FLP_FILE = 'flp.csv'
 
 # ---------- Очистка текста ----------
 def clean_text(s):
@@ -125,8 +125,11 @@ except Exception as e:
 print(f"✅ OEM-база: {len(oem_norm_to_art)} уникальных нормализованных OEM-номеров.")
 
 # ---------- Загрузка базы FLP-кроссов (flp.csv) ----------
-flp_norm_to_art = defaultdict(set)
-flp_original_info = {}
+# Двунаправленный поиск: flp -> артикулы и артикул -> flp
+flp_norm_to_art = defaultdict(set)   # нормализованный FLP номер -> множество артикулов
+art_norm_to_flp = defaultdict(set)   # нормализованный артикул -> множество FLP номеров
+flp_original_info = {}                # оригинальный FLP -> список артикулов (для отображения)
+art_original_info = {}                # оригинальный артикул -> список FLP номеров
 
 try:
     with open(FLP_FILE, mode='r', encoding='utf-8-sig') as file:
@@ -136,17 +139,22 @@ try:
                 art = clean_text(row[0])
                 flp = clean_text(row[1])
                 if art and flp:
-                    norm = normalize(flp)
-                    flp_norm_to_art[norm].add(art)
+                    norm_flp = normalize(flp)
+                    norm_art = normalize(art)
+                    flp_norm_to_art[norm_flp].add(art)
+                    art_norm_to_flp[norm_art].add(flp)
                     if flp not in flp_original_info:
                         flp_original_info[flp] = []
                     flp_original_info[flp].append(art)
+                    if art not in art_original_info:
+                        art_original_info[art] = []
+                    art_original_info[art].append(flp)
 except FileNotFoundError:
     print("⚠️ Файл flp.csv не найден, поиск по FLP-номерам недоступен.")
 except Exception as e:
     print(f"❌ Ошибка загрузки {FLP_FILE}: {e}")
 
-print(f"✅ FLP-база: {len(flp_norm_to_art)} уникальных нормализованных FLP-номеров.")
+print(f"✅ FLP-база: {len(flp_norm_to_art)} уникальных FLP-номеров, {len(art_norm_to_flp)} уникальных артикулов.")
 
 # ---------- Функция частичного поиска в основной базе ----------
 def partial_search_main(search_norm):
@@ -225,7 +233,8 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text(reply)
         return
 
-    # ---------- 3. Поиск по FLP-базе ----------
+    # ---------- 3. Поиск по FLP-базе (двунаправленный) ----------
+    # Сначала ищем как FLP номер -> артикулы
     flp_arts = set()
     if input_len < MIN_SEARCH_LENGTH:
         if user_input_norm in flp_norm_to_art:
@@ -238,6 +247,22 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if flp_arts:
         lines = [f"• {art}" for art in sorted(flp_arts)]
         reply = f"🔍 По FLP-номеру `{user_input}` найдены артикулы:\n" + "\n".join(lines)
+        await update.message.reply_text(reply)
+        return
+
+    # Затем ищем как артикул -> FLP номера
+    flp_nums = set()
+    if input_len < MIN_SEARCH_LENGTH:
+        if user_input_norm in art_norm_to_flp:
+            flp_nums = art_norm_to_flp[user_input_norm]
+    else:
+        for norm_key, nums in art_norm_to_flp.items():
+            if user_input_norm in norm_key:
+                flp_nums.update(nums)
+
+    if flp_nums:
+        lines = [f"• {num}" for num in sorted(flp_nums)]
+        reply = f"🔍 По артикулу `{user_input}` найдены FLP-номера:\n" + "\n".join(lines)
         await update.message.reply_text(reply)
         return
 
@@ -288,7 +313,7 @@ def main():
     app.add_handler(CommandHandler("start", start))
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message))
 
-    print("🚀 ТУРБОНАЙЗЕР бот с JRN-, OEM- и FLP-кроссами и коррекцией раскладки запущен...")
+    print("🚀 ТУРБОНАЙЗЕР бот с JRN-, OEM- и двунаправленным FLP-поиском и коррекцией раскладки запущен...")
     app.run_polling()
 
 if __name__ == '__main__':
