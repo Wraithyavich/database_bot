@@ -40,11 +40,9 @@ CYRILLIC_TO_LATIN = {
 }
 
 def replace_cyrillic_like_latin(s):
-    """Заменяет кириллические символы на похожие латинские."""
     return ''.join(CYRILLIC_TO_LATIN.get(ch, ch) for ch in s)
 
 def normalize(s):
-    """Удаляет дефисы, приводит к нижнему регистру, предварительно заменяя кириллицу."""
     s = replace_cyrillic_like_latin(s)
     return s.replace('-', '').lower()
 
@@ -76,8 +74,7 @@ except FileNotFoundError:
 print(f"✅ Основная база: {len(dict_by_col1)} Turbo P/N, {len(dict_by_col2)} E&E P/N.")
 
 # ---------- Загрузка базы JRN-кроссов (jronecross.csv) ----------
-jrone_norm_to_art = defaultdict(set)
-jrone_original_info = {}
+jrone_norm_to_art = defaultdict(set)   # нормализованный JRN -> множество артикулов
 
 try:
     with open(JRONE_FILE, mode='r', encoding='utf-8-sig') as file:
@@ -85,14 +82,10 @@ try:
         for row in reader:
             if len(row) >= 3:
                 jrone = clean_text(row[0])
-                our_number = clean_text(row[1])
-                our_art = clean_text(row[2])
+                our_art = clean_text(row[2])      # третья колонка — наш артикул
                 if jrone and our_art:
                     norm = normalize(jrone)
                     jrone_norm_to_art[norm].add(our_art)
-                    if jrone not in jrone_original_info:
-                        jrone_original_info[jrone] = []
-                    jrone_original_info[jrone].append((our_number, our_art))
 except FileNotFoundError:
     print("⚠️ Файл jronecross.csv не найден, поиск по JRN-номерам недоступен.")
 except Exception as e:
@@ -101,8 +94,7 @@ except Exception as e:
 print(f"✅ JRN-база: {len(jrone_norm_to_art)} уникальных нормализованных JRN-номеров.")
 
 # ---------- Загрузка базы OEM-кроссов (oemcross.csv) ----------
-oem_norm_to_art = defaultdict(set)
-oem_original_info = {}
+oem_norm_to_art = defaultdict(set)   # нормализованный OEM -> множество артикулов
 
 try:
     with open(OEM_FILE, mode='r', encoding='utf-8-sig') as file:
@@ -114,9 +106,6 @@ try:
                 if art and oem:
                     norm = normalize(oem)
                     oem_norm_to_art[norm].add(art)
-                    if oem not in oem_original_info:
-                        oem_original_info[oem] = []
-                    oem_original_info[oem].append(art)
 except FileNotFoundError:
     print("⚠️ Файл oemcross.csv не найден, поиск по OEM-номерам недоступен.")
 except Exception as e:
@@ -125,11 +114,8 @@ except Exception as e:
 print(f"✅ OEM-база: {len(oem_norm_to_art)} уникальных нормализованных OEM-номеров.")
 
 # ---------- Загрузка базы FLP-кроссов (flp.csv) ----------
-# Двунаправленный поиск: flp -> артикулы и артикул -> flp
 flp_norm_to_art = defaultdict(set)   # нормализованный FLP номер -> множество артикулов
 art_norm_to_flp = defaultdict(set)   # нормализованный артикул -> множество FLP номеров
-flp_original_info = {}                # оригинальный FLP -> список артикулов (для отображения)
-art_original_info = {}                # оригинальный артикул -> список FLP номеров
 
 try:
     with open(FLP_FILE, mode='r', encoding='utf-8-sig') as file:
@@ -143,12 +129,6 @@ try:
                     norm_art = normalize(art)
                     flp_norm_to_art[norm_flp].add(art)
                     art_norm_to_flp[norm_art].add(flp)
-                    if flp not in flp_original_info:
-                        flp_original_info[flp] = []
-                    flp_original_info[flp].append(art)
-                    if art not in art_original_info:
-                        art_original_info[art] = []
-                    art_original_info[art].append(flp)
 except FileNotFoundError:
     print("⚠️ Файл flp.csv не найден, поиск по FLP-номерам недоступен.")
 except Exception as e:
@@ -171,6 +151,17 @@ def partial_search_main(search_norm):
                     results.add(val)
     return results
 
+# ---------- Вспомогательная функция для форматирования артикула со связями ----------
+def format_art_with_links(art):
+    if art in dict_by_col1:
+        eee_list = sorted(set(dict_by_col1[art]))
+        return f"• {art} → {', '.join(eee_list)}"
+    elif art in dict_by_col2:
+        turbo_list = sorted(set(dict_by_col2[art]))
+        return f"• {art} → {', '.join(turbo_list)}"
+    else:
+        return f"• {art} (нет в основной базе)"
+
 # ---------- Обработчики ----------
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     emoji_id = "5247029251940586192"
@@ -192,7 +183,41 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_input_norm = normalize(user_input)
     input_len = len(user_input_norm)
 
-    # ---------- 1. Поиск по JRN-базе ----------
+    # Списки для результатов из разных источников
+    main_lines = []      # строки из основной базы data.csv
+    jrone_lines = []     # строки из JRN (артикулы со связями)
+    oem_lines = []       # строки из OEM (просто артикулы)
+    flp_lines = []       # строки из FLP (артикулы или номера)
+
+    # ------------------ ПОИСК В ОСНОВНОЙ БАЗЕ (data.csv) ------------------
+    if input_len < MIN_SEARCH_LENGTH:
+        # Точный поиск
+        if user_input_norm in col2_norm_to_original:
+            for key in col2_norm_to_original[user_input_norm]:
+                for val in dict_by_col2[key]:
+                    main_lines.append(f"• {val}")
+        elif user_input_norm in col1_norm_to_original:
+            for key in col1_norm_to_original[user_input_norm]:
+                for val in dict_by_col1[key]:
+                    main_lines.append(f"• {val}")
+    else:
+        # Частичный поиск
+        results = partial_search_main(user_input_norm)
+        for val in sorted(results):
+            main_lines.append(f"• {val}")
+
+        # Если ничего не найдено, пробуем заменить среднюю часть на 970 для 11-значных номеров
+        if not results and is_11_digit_number(user_input_norm):
+            first4 = user_input_norm[:4]
+            middle3 = user_input_norm[4:7]
+            last4 = user_input_norm[7:]
+            if middle3 != '970':
+                new_norm = first4 + '970' + last4
+                results = partial_search_main(new_norm)
+                for val in sorted(results):
+                    main_lines.append(f"• {val}")
+
+    # ------------------ ПОИСК В JRN ------------------
     jrone_arts = set()
     if input_len < MIN_SEARCH_LENGTH:
         if user_input_norm in jrone_norm_to_art:
@@ -202,22 +227,10 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
             if user_input_norm in norm_key:
                 jrone_arts.update(arts)
 
-    if jrone_arts:
-        lines = []
-        for art in sorted(jrone_arts):
-            if art in dict_by_col1:
-                eee_list = sorted(set(dict_by_col1[art]))
-                lines.append(f"• {art} → {', '.join(eee_list)}")
-            elif art in dict_by_col2:
-                turbo_list = sorted(set(dict_by_col2[art]))
-                lines.append(f"• {art} → {', '.join(turbo_list)}")
-            else:
-                lines.append(f"• {art} (нет в основной базе)")
-        reply = f"🔍 По JRN-номеру `{user_input}` найдены артикулы:\n" + "\n".join(lines)
-        await update.message.reply_text(reply)
-        return
+    for art in sorted(jrone_arts):
+        jrone_lines.append(format_art_with_links(art))
 
-    # ---------- 2. Поиск по OEM-базе ----------
+    # ------------------ ПОИСК В OEM ------------------
     oem_arts = set()
     if input_len < MIN_SEARCH_LENGTH:
         if user_input_norm in oem_norm_to_art:
@@ -227,15 +240,13 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
             if user_input_norm in norm_key:
                 oem_arts.update(arts)
 
-    if oem_arts:
-        lines = [f"• {art}" for art in sorted(oem_arts)]
-        reply = f"🔍 По OEM-номеру `{user_input}` найдены артикулы:\n" + "\n".join(lines)
-        await update.message.reply_text(reply)
-        return
+    for art in sorted(oem_arts):
+        oem_lines.append(f"• {art}")
 
-    # ---------- 3. Поиск по FLP-базе (двунаправленный) ----------
-    # Сначала ищем как FLP номер -> артикулы
+    # ------------------ ПОИСК В FLP (двунаправленный) ------------------
     flp_arts = set()
+    flp_nums = set()
+    # Ищем как FLP номер -> артикулы
     if input_len < MIN_SEARCH_LENGTH:
         if user_input_norm in flp_norm_to_art:
             flp_arts = flp_norm_to_art[user_input_norm]
@@ -244,14 +255,7 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
             if user_input_norm in norm_key:
                 flp_arts.update(arts)
 
-    if flp_arts:
-        lines = [f"• {art}" for art in sorted(flp_arts)]
-        reply = f"🔍 По FLP-номеру `{user_input}` найдены артикулы:\n" + "\n".join(lines)
-        await update.message.reply_text(reply)
-        return
-
-    # Затем ищем как артикул -> FLP номера
-    flp_nums = set()
+    # Ищем как артикул -> FLP номера
     if input_len < MIN_SEARCH_LENGTH:
         if user_input_norm in art_norm_to_flp:
             flp_nums = art_norm_to_flp[user_input_norm]
@@ -260,60 +264,58 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
             if user_input_norm in norm_key:
                 flp_nums.update(nums)
 
-    if flp_nums:
-        lines = [f"• {num}" for num in sorted(flp_nums)]
-        reply = f"🔍 По артикулу `{user_input}` найдены FLP-номера:\n" + "\n".join(lines)
-        await update.message.reply_text(reply)
-        return
+    # Собираем строки для FLP
+    for art in sorted(flp_arts):
+        flp_lines.append(f"• FLP артикул: {art}")
+    for num in sorted(flp_nums):
+        flp_lines.append(f"• FLP номер: {num}")
 
-    # ---------- 4. Поиск в основной базе ----------
-    if input_len < MIN_SEARCH_LENGTH:
-        if user_input_norm in col2_norm_to_original:
-            original_keys = col2_norm_to_original[user_input_norm]
-            values = set()
-            for key in original_keys:
-                values.update(dict_by_col2[key])
-            reply = f"🔍 Найден E&E P/N для `{user_input}`:\n" + "\n".join(f"• {v}" for v in sorted(values))
-        elif user_input_norm in col1_norm_to_original:
-            original_keys = col1_norm_to_original[user_input_norm]
-            values = set()
-            for key in original_keys:
-                values.update(dict_by_col1[key])
-            reply = f"🔍 Найден Turbo P/N для `{user_input}`:\n" + "\n".join(f"• {v}" for v in sorted(values))
+    # ------------------ ФОРМИРОВАНИЕ ОТВЕТА ------------------
+    response_parts = []
+
+    # Основная база всегда идёт первой, если есть результаты
+    if main_lines:
+        if len(main_lines) == 1 and not any([jrone_lines, oem_lines, flp_lines]):
+            # Если только один результат и нет дополнительных, можно использовать старый заголовок
+            # Но чтобы не усложнять, оставим общий заголовок
+            response_parts.append(f"🔍 Результаты поиска для `{user_input}`:")
         else:
-            reply = f"❌ Точное значение не найдено. Для поиска по части номера введите минимум {MIN_SEARCH_LENGTH} символа."
-        await update.message.reply_text(reply)
-        return
+            response_parts.append(f"🔍 Основная база:")
+        response_parts.extend(main_lines)
 
-    results = partial_search_main(user_input_norm)
+    # JRN
+    if jrone_lines:
+        if response_parts:
+            response_parts.append("")  # пустая строка для разделения
+        response_parts.append(f"🔍 По JRN-номеру найдены артикулы:")
+        response_parts.extend(jrone_lines)
 
-    if not results and is_11_digit_number(user_input_norm):
-        first4 = user_input_norm[:4]
-        middle3 = user_input_norm[4:7]
-        last4 = user_input_norm[7:]
-        if middle3 != '970':
-            new_norm = first4 + '970' + last4
-            results = partial_search_main(new_norm)
-            if results:
-                lines = [f"• {v}" for v in sorted(results)]
-                reply = f"🔍 Результаты для `{user_input}`:\n" + "\n".join(lines)
-                await update.message.reply_text(reply)
-                return
+    # OEM
+    if oem_lines:
+        if response_parts:
+            response_parts.append("")
+        response_parts.append(f"🔍 По OEM-номеру найдены артикулы:")
+        response_parts.extend(oem_lines)
 
-    if not results:
-        reply = f"❌ Ничего не найдено по запросу `{user_input}`."
-    else:
-        lines = [f"• {v}" for v in sorted(results)]
-        reply = f"🔍 Результаты поиска для `{user_input}`:\n" + "\n".join(lines)
+    # FLP
+    if flp_lines:
+        if response_parts:
+            response_parts.append("")
+        response_parts.append(f"🔍 По FLP найдено:")
+        response_parts.extend(flp_lines)
 
-    await update.message.reply_text(reply)
+    # Если ничего не найдено
+    if not response_parts:
+        response_parts.append(f"❌ Ничего не найдено по запросу `{user_input}`.")
+
+    await update.message.reply_text("\n".join(response_parts))
 
 def main():
     app = Application.builder().token(API_TOKEN).build()
     app.add_handler(CommandHandler("start", start))
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message))
 
-    print("🚀 ТУРБОНАЙЗЕР бот с JRN-, OEM- и двунаправленным FLP-поиском и коррекцией раскладки запущен...")
+    print("🚀 ТУРБОНАЙЗЕР бот с приоритетом data.csv и объединёнными результатами запущен...")
     app.run_polling()
 
 if __name__ == '__main__':
