@@ -167,7 +167,7 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     emoji_id = "5247029251940586192"
     welcome_text = (
         f"<tg-emoji emoji-id=\"{emoji_id}\">😊</tg-emoji> ТУРБОНАЙЗЕР бот приветствует!\n"
-        "Введите E&E P/N, Turbo P/N или JRN-номер\n\n"
+        "Введите E&E P/N, Turbo P/N, OEM номер или JRN-номер\n\n"
         "Пример: CT-VNT11B или 17201-52010\n\n"
         f"🔍 Можно искать по части номера (минимум {MIN_SEARCH_LENGTH} символа).\n"
         "Дефисы можно не ставить – бот поймёт.\n"
