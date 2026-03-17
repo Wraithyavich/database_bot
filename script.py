@@ -270,52 +270,39 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     for num in sorted(flp_nums):
         flp_lines.append(f"• FLP номер: {num}")
 
-    # ------------------ ФОРМИРОВАНИЕ ОТВЕТА ------------------
-    response_parts = []
-
-    # Основная база всегда идёт первой, если есть результаты
+    # ------------------ ФОРМИРОВАНИЕ ОТВЕТА (без заголовков) ------------------
+    answer_lines = []
+    # Основная база всегда первой
     if main_lines:
-        if len(main_lines) == 1 and not any([jrone_lines, oem_lines, flp_lines]):
-            # Если только один результат и нет дополнительных, можно использовать старый заголовок
-            # Но чтобы не усложнять, оставим общий заголовок
-            response_parts.append(f"🔍 Результаты поиска для `{user_input}`:")
-        else:
-            response_parts.append(f"🔍 Основная база:")
-        response_parts.extend(main_lines)
-
-    # JRN
+        answer_lines.extend(main_lines)
+    # Добавляем JRN, если есть
     if jrone_lines:
-        if response_parts:
-            response_parts.append("")  # пустая строка для разделения
-        response_parts.append(f"🔍 По JRN-номеру найдены артикулы:")
-        response_parts.extend(jrone_lines)
-
-    # OEM
+        if answer_lines:
+            answer_lines.append("")  # пустая строка для разделения блоков
+        answer_lines.extend(jrone_lines)
+    # Добавляем OEM
     if oem_lines:
-        if response_parts:
-            response_parts.append("")
-        response_parts.append(f"🔍 По OEM-номеру найдены артикулы:")
-        response_parts.extend(oem_lines)
-
-    # FLP
+        if answer_lines and not (answer_lines[-1] == ""):
+            answer_lines.append("")
+        answer_lines.extend(oem_lines)
+    # Добавляем FLP
     if flp_lines:
-        if response_parts:
-            response_parts.append("")
-        response_parts.append(f"🔍 По FLP найдено:")
-        response_parts.extend(flp_lines)
+        if answer_lines and not (answer_lines[-1] == ""):
+            answer_lines.append("")
+        answer_lines.extend(flp_lines)
 
     # Если ничего не найдено
-    if not response_parts:
-        response_parts.append(f"❌ Ничего не найдено по запросу `{user_input}`.")
+    if not answer_lines:
+        answer_lines.append(f"❌ Ничего не найдено по запросу `{user_input}`.")
 
-    await update.message.reply_text("\n".join(response_parts))
+    await update.message.reply_text("\n".join(answer_lines))
 
 def main():
     app = Application.builder().token(API_TOKEN).build()
     app.add_handler(CommandHandler("start", start))
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message))
 
-    print("🚀 ТУРБОНАЙЗЕР бот с приоритетом data.csv и объединёнными результатами запущен...")
+    print("🚀 ТУРБОНАЙЗЕР бот с приоритетом data.csv и объединёнными результатами без заголовков запущен...")
     app.run_polling()
 
 if __name__ == '__main__':
