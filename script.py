@@ -26,6 +26,7 @@ from turbo_database import (
     MIN_PARTIAL_SEARCH_LENGTH,
     SearchResult,
     TurboDatabase,
+    ensure_sqlite_database,
     normalize_number,
 )
 
@@ -38,11 +39,15 @@ logger = logging.getLogger(__name__)
 
 BASE_DIR = Path(__file__).resolve().parent
 API_TOKEN = os.environ.get("API_TOKEN")
+DEFAULT_DATABASE_DOWNLOAD_URL = (
+    "https://media.githubusercontent.com/media/"
+    "Wraithyavich/database_bot/master/turbo_parts.sqlite"
+)
 
 
 def resolve_database_path() -> Path:
     configured_path = os.environ.get("DATABASE_PATH")
-    path = Path(configured_path) if configured_path else BASE_DIR / "turbo_parts.sqlite"
+    path = Path(configured_path) if configured_path else BASE_DIR / "turbo_search.sqlite"
     if not path.is_absolute():
         path = BASE_DIR / path
     return path.resolve()
@@ -270,8 +275,25 @@ async def handle_image(
 
 
 def main() -> None:
+    global DATABASE
+
     if not API_TOKEN:
         raise ValueError("❌ Переменная окружения API_TOKEN не задана!")
+
+    database_path = ensure_sqlite_database(
+        DATABASE.path,
+        download_url=os.environ.get(
+            "DATABASE_DOWNLOAD_URL", DEFAULT_DATABASE_DOWNLOAD_URL
+        ),
+        cache_dir=os.environ.get("DATABASE_CACHE_DIR"),
+    )
+    if database_path != DATABASE.path:
+        logger.warning(
+            "В репозитории обнаружен Git LFS-указатель. "
+            "SQLite загружена в локальный кеш: %s",
+            database_path,
+        )
+        DATABASE = TurboDatabase(database_path)
 
     stats = DATABASE.validate()
     logger.info(
