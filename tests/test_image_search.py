@@ -15,7 +15,7 @@ from turbo_database import TurboDatabase, normalize_number
 
 
 PROJECT_DIR = Path(__file__).resolve().parents[1]
-DATABASE_PATH = PROJECT_DIR / "turbo_parts.sqlite"
+DATABASE_PATH = PROJECT_DIR / "turbo_search.sqlite"
 
 
 class CandidateExtractionTests(unittest.TestCase):
