@@ -21,6 +21,11 @@ from image_search import (
     RapidOcrRecognizer,
     search_image_candidates,
 )
+from request_limits import (
+    ImageRejectedError,
+    SlidingWindowRateLimiter,
+    validate_image_file,
+)
 from turbo_database import (
     DEFAULT_RESULT_LIMIT,
     MIN_PARTIAL_SEARCH_LENGTH,
@@ -43,6 +48,21 @@ DEFAULT_DATABASE_DOWNLOAD_URL = (
     "https://media.githubusercontent.com/media/"
     "Wraithyavich/database_bot/master/turbo_parts.sqlite"
 )
+MAX_IMAGE_FILE_BYTES = 8 * 1024 * 1024
+MAX_IMAGE_PIXELS = 16_000_000
+UPDATE_QUEUE_SIZE = 64
+MAX_CONCURRENT_UPDATES = 4
+OCR_ACQUIRE_TIMEOUT = 0.05
+ALLOWED_IMAGE_SUFFIXES = {
+    ".bmp",
+    ".gif",
+    ".jpeg",
+    ".jpg",
+    ".png",
+    ".tif",
+    ".tiff",
+    ".webp",
+}
 
 
 def resolve_database_path() -> Path:
@@ -56,6 +76,29 @@ def resolve_database_path() -> Path:
 DATABASE = TurboDatabase(resolve_database_path())
 OCR_RECOGNIZER = RapidOcrRecognizer()
 TELEGRAM_MESSAGE_LIMIT = 4000
+OCR_SEMAPHORE = asyncio.Semaphore(1)
+USER_IMAGE_RATE_LIMITER = SlidingWindowRateLimiter(
+    limit=3,
+    window_seconds=60,
+)
+GLOBAL_IMAGE_RATE_LIMITER = SlidingWindowRateLimiter(
+    limit=12,
+    window_seconds=60,
+    max_keys=1,
+)
+RATE_LIMIT_NOTICE_LIMITER = SlidingWindowRateLimiter(
+    limit=1,
+    window_seconds=30,
+)
+USER_TEXT_RATE_LIMITER = SlidingWindowRateLimiter(
+    limit=30,
+    window_seconds=60,
+)
+GLOBAL_TEXT_RATE_LIMITER = SlidingWindowRateLimiter(
+    limit=180,
+    window_seconds=60,
+    max_keys=1,
+)
 
 
 def clean_text(value: str) -> str:
@@ -208,6 +251,26 @@ async def handle_message(
     if not user_input:
         return
 
+    user = update.effective_user
+    rate_limit_key = user.id if user is not None else update.message.chat_id
+    user_limit = USER_TEXT_RATE_LIMITER.allow(rate_limit_key)
+    if not user_limit.allowed:
+        notice = RATE_LIMIT_NOTICE_LIMITER.allow(rate_limit_key)
+        if notice.allowed:
+            await update.message.reply_text(
+                "⏳ Слишком много запросов. Повторите немного позже."
+            )
+        return
+
+    global_limit = GLOBAL_TEXT_RATE_LIMITER.allow("global")
+    if not global_limit.allowed:
+        notice = RATE_LIMIT_NOTICE_LIMITER.allow(rate_limit_key)
+        if notice.allowed:
+            await update.message.reply_text(
+                "⏳ Бот временно перегружен. Повторите запрос немного позже."
+            )
+        return
+
     try:
         result = await asyncio.to_thread(DATABASE.search, user_input)
     except (OSError, sqlite3.Error, RuntimeError):
@@ -229,12 +292,60 @@ async def handle_image(
         return
 
     if message.photo:
-        file_id = message.photo[-1].file_id
+        image_file = message.photo[-1]
+        file_id = image_file.file_id
+        file_size = image_file.file_size or 0
         suffix = ".jpg"
     elif message.document is not None:
         file_id = message.document.file_id
+        file_size = message.document.file_size or 0
         suffix = Path(message.document.file_name or "image.jpg").suffix or ".jpg"
     else:
+        return
+
+    if suffix.lower() not in ALLOWED_IMAGE_SUFFIXES:
+        suffix = ".img"
+
+    if file_size > MAX_IMAGE_FILE_BYTES:
+        await message.reply_text(
+            "❌ Изображение слишком большое. Максимальный размер — 8 МБ."
+        )
+        return
+
+    user = update.effective_user
+    rate_limit_key = user.id if user is not None else message.chat_id
+    user_limit = USER_IMAGE_RATE_LIMITER.allow(rate_limit_key)
+    if not user_limit.allowed:
+        notice = RATE_LIMIT_NOTICE_LIMITER.allow(rate_limit_key)
+        if notice.allowed:
+            await message.reply_text(
+                "⏳ Слишком много запросов по фото. "
+                f"Повторите примерно через {user_limit.retry_after} сек."
+            )
+        return
+
+    global_limit = GLOBAL_IMAGE_RATE_LIMITER.allow("global")
+    if not global_limit.allowed:
+        notice = RATE_LIMIT_NOTICE_LIMITER.allow(rate_limit_key)
+        if notice.allowed:
+            await message.reply_text(
+                "⏳ Бот временно перегружен обработкой фотографий. "
+                f"Повторите примерно через {global_limit.retry_after} сек."
+            )
+        return
+
+    try:
+        await asyncio.wait_for(
+            OCR_SEMAPHORE.acquire(),
+            timeout=OCR_ACQUIRE_TIMEOUT,
+        )
+    except TimeoutError:
+        notice = RATE_LIMIT_NOTICE_LIMITER.allow(rate_limit_key)
+        if notice.allowed:
+            await message.reply_text(
+                "⏳ Сейчас обрабатывается другое изображение. "
+                "Повторите попытку через несколько секунд."
+            )
         return
 
     try:
@@ -242,6 +353,12 @@ async def handle_image(
         with tempfile.TemporaryDirectory(prefix="turbo_ocr_") as temp_dir:
             image_path = Path(temp_dir) / f"image{suffix.lower()}"
             await telegram_file.download_to_drive(custom_path=image_path)
+            await asyncio.to_thread(
+                validate_image_file,
+                image_path,
+                max_bytes=MAX_IMAGE_FILE_BYTES,
+                max_pixels=MAX_IMAGE_PIXELS,
+            )
             candidates = await asyncio.to_thread(
                 OCR_RECOGNIZER.recognize, image_path
             )
@@ -255,6 +372,13 @@ async def handle_image(
             "OCR-компонент не запустился."
         )
         return
+    except ImageRejectedError as error:
+        logger.info("Изображение отклонено: %s", error)
+        await message.reply_text(
+            "❌ Файл слишком большой, повреждён или имеет чрезмерное разрешение. "
+            "Отправьте изображение до 8 МБ и 16 мегапикселей."
+        )
+        return
     except (OSError, RuntimeError, sqlite3.Error, TelegramError):
         logger.exception("Ошибка обработки изображения")
         await message.reply_text(
@@ -262,6 +386,8 @@ async def handle_image(
             "Попробуйте другое фото без бликов и размытия."
         )
         return
+    finally:
+        OCR_SEMAPHORE.release()
 
     if not candidates:
         lines = [
@@ -315,7 +441,14 @@ def main() -> None:
         stats.sources,
     )
 
-    app = Application.builder().token(API_TOKEN).build()
+    update_queue: asyncio.Queue[object] = asyncio.Queue(maxsize=UPDATE_QUEUE_SIZE)
+    app = (
+        Application.builder()
+        .token(API_TOKEN)
+        .update_queue(update_queue)
+        .concurrent_updates(MAX_CONCURRENT_UPDATES)
+        .build()
+    )
     app.add_handler(CommandHandler("start", start))
     app.add_handler(
         MessageHandler(filters.PHOTO | filters.Document.IMAGE, handle_image)
