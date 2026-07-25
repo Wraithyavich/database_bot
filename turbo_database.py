@@ -1,7 +1,11 @@
 from __future__ import annotations
 
+import hashlib
+import os
 import re
 import sqlite3
+import tempfile
+import urllib.request
 from contextlib import closing
 from dataclasses import dataclass
 from pathlib import Path
@@ -28,6 +32,11 @@ _CYRILLIC_LOOKALIKES = str.maketrans(
 )
 _NON_ALPHANUMERIC = re.compile(r"[^A-Z0-9]")
 _REQUIRED_TABLES = {"parts", "numbers", "sources"}
+_SQLITE_HEADER = b"SQLite format 3\x00"
+_LFS_POINTER_HEADER = "version https://git-lfs.github.com/spec/v1"
+_LFS_OID_PATTERN = re.compile(r"^oid sha256:([0-9a-f]{64})$", re.MULTILINE)
+_LFS_SIZE_PATTERN = re.compile(r"^size ([0-9]+)$", re.MULTILINE)
+_DOWNLOAD_CHUNK_SIZE = 1024 * 1024
 
 
 def normalize_number(value: str) -> str:
@@ -61,6 +70,128 @@ class DatabaseStats:
     numbers: int
     crossrefs: int
     sources: int
+
+
+@dataclass(frozen=True)
+class GitLfsPointer:
+    oid: str
+    size: int
+
+
+def is_sqlite_database(path: str | Path) -> bool:
+    database_path = Path(path)
+    try:
+        with database_path.open("rb") as database_file:
+            return database_file.read(len(_SQLITE_HEADER)) == _SQLITE_HEADER
+    except OSError:
+        return False
+
+
+def read_git_lfs_pointer(path: str | Path) -> GitLfsPointer | None:
+    pointer_path = Path(path)
+    try:
+        if pointer_path.stat().st_size > 4096:
+            return None
+        content = pointer_path.read_text(encoding="ascii")
+    except (OSError, UnicodeError):
+        return None
+
+    if not content.startswith(_LFS_POINTER_HEADER):
+        return None
+
+    oid_match = _LFS_OID_PATTERN.search(content)
+    size_match = _LFS_SIZE_PATTERN.search(content)
+    if oid_match is None or size_match is None:
+        return None
+    return GitLfsPointer(oid=oid_match.group(1), size=int(size_match.group(1)))
+
+
+def ensure_sqlite_database(
+    path: str | Path,
+    *,
+    download_url: str | None,
+    cache_dir: str | Path | None = None,
+    timeout: float = 300,
+) -> Path:
+    """Return a usable SQLite file, downloading an unresolved Git LFS object when needed."""
+    database_path = Path(path).expanduser().resolve()
+    if is_sqlite_database(database_path):
+        return database_path
+
+    pointer = read_git_lfs_pointer(database_path)
+    if not download_url:
+        if pointer is not None:
+            raise sqlite3.DatabaseError(
+                f"{database_path} contains a Git LFS pointer instead of the SQLite database"
+            )
+        raise sqlite3.DatabaseError(
+            f"{database_path} is missing or is not a SQLite database"
+        )
+
+    destination_dir = (
+        Path(cache_dir).expanduser().resolve()
+        if cache_dir is not None
+        else Path(tempfile.gettempdir()).resolve() / "turbo-database"
+    )
+    destination_dir.mkdir(parents=True, exist_ok=True)
+
+    cache_key = pointer.oid[:16] if pointer is not None else "downloaded"
+    destination_path = destination_dir / f"{database_path.stem}-{cache_key}.sqlite"
+    if is_sqlite_database(destination_path):
+        if pointer is None or destination_path.stat().st_size == pointer.size:
+            return destination_path
+
+    request = urllib.request.Request(
+        download_url,
+        headers={"User-Agent": "database-bot/1.0"},
+    )
+    temporary_path: Path | None = None
+    try:
+        with tempfile.NamedTemporaryFile(
+            mode="wb",
+            prefix=f"{database_path.stem}-",
+            suffix=".sqlite.tmp",
+            dir=destination_dir,
+            delete=False,
+        ) as temporary_file:
+            temporary_path = Path(temporary_file.name)
+            digest = hashlib.sha256()
+            downloaded_size = 0
+            with urllib.request.urlopen(request, timeout=timeout) as response:
+                while chunk := response.read(_DOWNLOAD_CHUNK_SIZE):
+                    temporary_file.write(chunk)
+                    digest.update(chunk)
+                    downloaded_size += len(chunk)
+            temporary_file.flush()
+            os.fsync(temporary_file.fileno())
+
+        if pointer is not None and downloaded_size != pointer.size:
+            raise sqlite3.DatabaseError(
+                "Downloaded SQLite size does not match the Git LFS pointer "
+                f"({downloaded_size} != {pointer.size})"
+            )
+        if pointer is not None and digest.hexdigest() != pointer.oid:
+            raise sqlite3.DatabaseError(
+                "Downloaded SQLite checksum does not match the Git LFS pointer"
+            )
+        if not is_sqlite_database(temporary_path):
+            raise sqlite3.DatabaseError(
+                "Downloaded file is not a valid SQLite database"
+            )
+
+        os.replace(temporary_path, destination_path)
+        temporary_path = None
+        return destination_path
+    except (OSError, urllib.error.URLError) as error:
+        raise sqlite3.DatabaseError(
+            f"Unable to download SQLite database from {download_url}: {error}"
+        ) from error
+    finally:
+        if temporary_path is not None:
+            try:
+                temporary_path.unlink()
+            except FileNotFoundError:
+                pass
 
 
 class TurboDatabase:
