@@ -1,0 +1,56 @@
+{
+  "version": 1,
+  "records": [
+    {
+      "vin": "SALLSAAG4AA249280",
+      "status": "verified",
+      "make": "Land Rover",
+      "model": "Range Rover Sport L320",
+      "model_year": "2010",
+      "engine": "3.0 TDV6",
+      "power_kw": "180",
+      "fitments": [
+        {
+          "position": "Левая, основная",
+          "oem_numbers": [
+            "LR013202"
+          ],
+          "turbo_numbers": [
+            "778400-0003"
+          ],
+          "articles": [
+            "GT17-092-1"
+          ]
+        },
+        {
+          "position": "Правая, дополнительная",
+          "oem_numbers": [
+            "LR021254"
+          ],
+          "turbo_numbers": [
+            "778401-0006"
+          ],
+          "articles": [
+            "GT14-009"
+          ]
+        }
+      ],
+      "sources": [
+        {
+          "label": "Jaguar Land Rover — левая основная турбина и VIN-диапазон",
+          "url": "https://parts.jaguarlandroverclassic.com/parts/index/part/id/23.52950.53086.43459/brand/land-rover/"
+        },
+        {
+          "label": "Jaguar Land Rover — правая дополнительная турбина и VIN-диапазон",
+          "url": "https://parts.jaguarlandroverclassic.com/parts/index/part/id/23.52950.53086.43400/brand/land-rover/"
+        },
+        {
+          "label": "Перекрёстные номера Garrett 778400/778401",
+          "url": "https://turboworks.co.uk/shop-online-turbochargers-actuators-chra-gasket-kits-turbo-parts-sell-buy-turboworks/528-remanufactured-bi-turbo-set-778400-0003-778401-0006-land-rover-discovery-range-rover-sport-30-tdv6-sdv6-211-255hp.html"
+        }
+      ],
+      "notes": "VIN AA249280 попадает в диапазон LR013202 до AA256675 и LR021254 от AA246304.",
+      "verified_at": "2026-07-26"
+    }
+  ]
+}

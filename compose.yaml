@@ -11,6 +11,9 @@ services:
       - .env
     environment:
       DATABASE_PATH: /app/turbo_search.sqlite
+      VIN_DATABASE_PATH: /data/vin_cache.sqlite
+    volumes:
+      - vin-data:/data
     init: true
     read_only: true
     tmpfs:
@@ -29,3 +32,6 @@ services:
       options:
         max-size: 10m
         max-file: "3"
+
+volumes:
+  vin-data:

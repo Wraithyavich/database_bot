@@ -34,6 +34,15 @@ from turbo_database import (
     ensure_sqlite_database,
     normalize_number,
 )
+from vin_search import (
+    NhtsaVinDecoder,
+    VinDecoderError,
+    VinRecord,
+    VinStore,
+    extract_vin,
+    format_pending_vin,
+    format_verified_vin,
+)
 
 
 logging.basicConfig(
@@ -65,6 +74,7 @@ ALLOWED_IMAGE_SUFFIXES = {
     ".tiff",
     ".webp",
 }
+VIN_SEED_PATH = BASE_DIR / "vin_verified.json"
 
 
 def resolve_database_path() -> Path:
@@ -75,8 +85,19 @@ def resolve_database_path() -> Path:
     return path.resolve()
 
 
+def resolve_vin_database_path() -> Path:
+    configured_path = os.environ.get("VIN_DATABASE_PATH")
+    path = Path(configured_path) if configured_path else BASE_DIR / "vin_cache.sqlite"
+    if not path.is_absolute():
+        path = BASE_DIR / path
+    return path.resolve()
+
+
 DATABASE = TurboDatabase(resolve_database_path())
 OCR_RECOGNIZER = RapidOcrRecognizer()
+VIN_STORE = VinStore(resolve_vin_database_path())
+VIN_DECODER = NhtsaVinDecoder()
+VIN_SEARCH_READY = False
 TELEGRAM_MESSAGE_LIMIT = 4000
 OCR_SEMAPHORE = asyncio.Semaphore(1)
 USER_IMAGE_RATE_LIMITER = SlidingWindowRateLimiter(
@@ -99,6 +120,15 @@ USER_TEXT_RATE_LIMITER = SlidingWindowRateLimiter(
 GLOBAL_TEXT_RATE_LIMITER = SlidingWindowRateLimiter(
     limit=180,
     window_seconds=60,
+    max_keys=1,
+)
+USER_NEW_VIN_RATE_LIMITER = SlidingWindowRateLimiter(
+    limit=3,
+    window_seconds=600,
+)
+GLOBAL_NEW_VIN_RATE_LIMITER = SlidingWindowRateLimiter(
+    limit=20,
+    window_seconds=600,
     max_keys=1,
 )
 
@@ -235,12 +265,81 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         "ТУРБОНАЙЗЕР бот приветствует!\n"
         "Введите E&E P/N, Turbo P/N, OEM, JRONE или FLP номер.\n\n"
         "Пример: 17201-52010 или 1000-010-006\n\n"
+        "Для проверенного подбора можно отправить 17-значный VIN.\n\n"
         "Также можно отправить фотографию шильдика или номера.\n\n"
         f"Можно искать по части номера — минимум "
         f"{MIN_PARTIAL_SEARCH_LENGTH} символа. "
         "Дефисы, пробелы и регистр не имеют значения."
     )
     await update.message.reply_text(welcome_text, parse_mode="HTML")
+
+
+async def handle_vin_query(
+    update: Update,
+    vin: str,
+    *,
+    rate_limit_key: object,
+) -> None:
+    message = update.message
+    if message is None:
+        return
+
+    if not VIN_SEARCH_READY:
+        await message.reply_text(
+            "❌ Поиск по VIN временно недоступен. Попробуйте позднее."
+        )
+        return
+
+    try:
+        record = await asyncio.to_thread(VIN_STORE.lookup, vin)
+        if record is not None and record.status == "verified":
+            lines = format_verified_vin(record)
+        else:
+            decoder_failed = False
+            if record is None:
+                user_limit = USER_NEW_VIN_RATE_LIMITER.allow(rate_limit_key)
+                global_limit = GLOBAL_NEW_VIN_RATE_LIMITER.allow("global")
+                if not user_limit.allowed or not global_limit.allowed:
+                    retry_after = max(
+                        user_limit.retry_after,
+                        global_limit.retry_after,
+                    )
+                    await message.reply_text(
+                        "⏳ Слишком много новых VIN-запросов. "
+                        f"Повторите примерно через {retry_after} сек."
+                    )
+                    return
+
+                try:
+                    record = await asyncio.to_thread(VIN_DECODER.decode, vin)
+                except VinDecoderError:
+                    logger.warning(
+                        "Базовый VIN-декодер недоступен для VIN …%s",
+                        vin[-6:],
+                        exc_info=True,
+                    )
+                    decoder_failed = True
+                    record = VinRecord(vin=vin, status="pending")
+
+            record = await asyncio.to_thread(
+                VIN_STORE.record_request,
+                vin,
+                decoded=record,
+            )
+            lines = (
+                format_verified_vin(record)
+                if record.status == "verified"
+                else format_pending_vin(record, decoder_failed=decoder_failed)
+            )
+    except (OSError, sqlite3.Error, RuntimeError, ValueError):
+        logger.exception("Ошибка VIN-поиска для VIN …%s", vin[-6:])
+        await message.reply_text(
+            "❌ VIN-база временно недоступна. Попробуйте позднее."
+        )
+        return
+
+    for chunk in split_long_message(lines):
+        await message.reply_text(chunk)
 
 
 async def handle_message(
@@ -271,6 +370,15 @@ async def handle_message(
             await update.message.reply_text(
                 "⏳ Бот временно перегружен. Повторите запрос немного позже."
             )
+        return
+
+    vin = extract_vin(user_input)
+    if vin is not None:
+        await handle_vin_query(
+            update,
+            vin,
+            rate_limit_key=rate_limit_key,
+        )
         return
 
     try:
@@ -404,7 +512,7 @@ async def handle_image(
 
 
 def main() -> None:
-    global DATABASE
+    global DATABASE, VIN_SEARCH_READY
 
     if not API_TOKEN:
         raise ValueError("❌ Переменная окружения API_TOKEN не задана!")
@@ -442,6 +550,22 @@ def main() -> None:
         stats.crossrefs,
         stats.sources,
     )
+
+    try:
+        vin_stats = VIN_STORE.initialize(seed_path=VIN_SEED_PATH)
+    except (OSError, sqlite3.Error, RuntimeError, ValueError):
+        logger.exception(
+            "VIN-хранилище не запустилось. Остальные виды поиска продолжат работать."
+        )
+    else:
+        VIN_SEARCH_READY = True
+        logger.info(
+            "VIN-хранилище загружено: %s проверенных, %s ожидают проверки, "
+            "%s запросов",
+            vin_stats.verified,
+            vin_stats.pending,
+            vin_stats.requests,
+        )
 
     update_queue: asyncio.Queue[object] = asyncio.Queue(maxsize=UPDATE_QUEUE_SIZE)
     app = (

@@ -7,6 +7,9 @@ venv/
 
 .env
 bot_token.py
+.deploy-*
+data/
+vin_cache.sqlite
 
 *.sqlite-shm
 *.sqlite-wal
