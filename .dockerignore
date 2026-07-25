@@ -1,8 +1,12 @@
 .git
 .github
 .idea
+.codex-*
+.deploy-smoke*
 .venv
 venv
+.env
+*.env
 __pycache__
 *.py[cod]
 *.sqlite-shm
