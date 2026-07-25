@@ -2,11 +2,13 @@
 .github
 .idea
 .codex-*
-.deploy-smoke*
+.deploy-*
 .venv
 venv
 .env
 *.env
+data
+vin_cache.sqlite
 __pycache__
 *.py[cod]
 *.sqlite-shm

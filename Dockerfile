@@ -20,7 +20,8 @@ COPY requirements.txt .
 RUN python -m pip install --no-cache-dir -r requirements.txt \
     && python -c "from rapidocr import RapidOCR; RapidOCR(); print('RapidOCR ready')"
 
-RUN useradd --create-home --uid 10001 bot
+RUN useradd --create-home --uid 10001 bot \
+    && install -d --owner=bot --group=bot /data
 
 COPY --chown=bot:bot . .
 
