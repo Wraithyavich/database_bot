@@ -1,0 +1,12 @@
+.idea/
+__pycache__/
+*.py[cod]
+
+.venv/
+venv/
+
+.env
+bot_token.py
+
+*.sqlite-shm
+*.sqlite-wal

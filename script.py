@@ -1,309 +1,297 @@
-import csv
+import asyncio
+import logging
 import os
-import re
-from collections import defaultdict
+import sqlite3
+import tempfile
+from pathlib import Path
+
 from telegram import Update
-from telegram.ext import Application, CommandHandler, MessageHandler, filters, ContextTypes
+from telegram.error import TelegramError
+from telegram.ext import (
+    Application,
+    CommandHandler,
+    ContextTypes,
+    MessageHandler,
+    filters,
+)
 
-# ---------- Получение токена из переменной окружения ----------
-API_TOKEN = os.environ.get('API_TOKEN')
-if API_TOKEN is None:
-    raise ValueError("❌ Переменная окружения API_TOKEN не задана!")
+from image_search import (
+    ImageSearchMatch,
+    OcrUnavailableError,
+    RapidOcrRecognizer,
+    search_image_candidates,
+)
+from turbo_database import (
+    DEFAULT_RESULT_LIMIT,
+    MIN_PARTIAL_SEARCH_LENGTH,
+    SearchResult,
+    TurboDatabase,
+    normalize_number,
+)
 
-# ---------- Константы ----------
-MIN_SEARCH_LENGTH = 4
-DATA_FILE = 'data.csv'
-JRONE_FILE = 'jronecross.csv'
-OEM_FILE = 'oemcross.csv'
-FLP_FILE = 'flp.csv'
 
-# ---------- Очистка текста ----------
-def clean_text(s):
-    s = s.strip()
-    s = s.replace('\r', '').replace('\n', '').replace('\ufeff', '')
-    return ' '.join(s.split())
+logging.basicConfig(
+    format="%(asctime)s %(levelname)s %(name)s: %(message)s",
+    level=logging.INFO,
+)
+logger = logging.getLogger(__name__)
 
-# ---------- Замена кириллических букв, похожих на латиницу ----------
-CYRILLIC_TO_LATIN = {
-    'А': 'A', 'а': 'a',
-    'В': 'B', 'в': 'b',
-    'Е': 'E', 'е': 'e',
-    'К': 'K', 'к': 'k',
-    'М': 'M', 'м': 'm',
-    'Н': 'H', 'н': 'h',
-    'О': 'O', 'о': 'o',
-    'Р': 'P', 'р': 'p',
-    'С': 'C', 'с': 'c',
-    'Т': 'T', 'т': 't',
-    'У': 'Y', 'у': 'y',
-    'Х': 'X', 'х': 'x',
-}
+BASE_DIR = Path(__file__).resolve().parent
+API_TOKEN = os.environ.get("API_TOKEN")
 
-def replace_cyrillic_like_latin(s):
-    return ''.join(CYRILLIC_TO_LATIN.get(ch, ch) for ch in s)
 
-def normalize(s):
-    s = replace_cyrillic_like_latin(s)
-    return s.replace('-', '').lower()
+def resolve_database_path() -> Path:
+    configured_path = os.environ.get("DATABASE_PATH")
+    path = Path(configured_path) if configured_path else BASE_DIR / "turbo_parts.sqlite"
+    if not path.is_absolute():
+        path = BASE_DIR / path
+    return path.resolve()
 
-def is_11_digit_number(s):
-    return re.fullmatch(r'\d{11}', s) is not None
 
-# ---------- Загрузка основной базы (data.csv) ----------
-dict_by_col1 = defaultdict(list)   # Turbo P/N -> список E&E P/N
-dict_by_col2 = defaultdict(list)   # E&E P/N -> список Turbo P/N
-col1_norm_to_original = defaultdict(list)  # нормализованный Turbo -> оригиналы
-col2_norm_to_original = defaultdict(list)  # нормализованный E&E -> оригиналы
+DATABASE = TurboDatabase(resolve_database_path())
+OCR_RECOGNIZER = RapidOcrRecognizer()
+TELEGRAM_MESSAGE_LIMIT = 4000
 
-try:
-    with open(DATA_FILE, mode='r', encoding='utf-8-sig') as file:
-        reader = csv.reader(file, delimiter=';')
-        for row in reader:
-            if len(row) >= 2:
-                col1 = clean_text(row[0])
-                col2 = clean_text(row[1])
-                if col1 and col2:
-                    dict_by_col1[col1].append(col2)
-                    dict_by_col2[col2].append(col1)
-                    col1_norm_to_original[normalize(col1)].append(col1)
-                    col2_norm_to_original[normalize(col2)].append(col2)
-except FileNotFoundError:
-    print("❌ Файл data.csv не найден! Поместите его в папку со скриптом.")
-    exit(1)
 
-print(f"✅ Основная база: {len(dict_by_col1)} Turbo P/N, {len(dict_by_col2)} E&E P/N.")
+def clean_text(value: str) -> str:
+    value = value.strip().replace("\r", "").replace("\n", "").replace("\ufeff", "")
+    return " ".join(value.split())
 
-# ---------- Загрузка базы JRN-кроссов (jronecross.csv) ----------
-jrone_norm_to_art = defaultdict(set)   # нормализованный JRN -> множество артикулов
 
-try:
-    with open(JRONE_FILE, mode='r', encoding='utf-8-sig') as file:
-        reader = csv.reader(file, delimiter=';')
-        for row in reader:
-            if len(row) >= 3:
-                jrone = clean_text(row[0])
-                our_art = clean_text(row[2])      # третья колонка — наш артикул
-                if jrone and our_art:
-                    norm = normalize(jrone)
-                    jrone_norm_to_art[norm].add(our_art)
-except FileNotFoundError:
-    print("⚠️ Файл jronecross.csv не найден, поиск по JRN-номерам недоступен.")
-except Exception as e:
-    print(f"❌ Ошибка загрузки {JRONE_FILE}: {e}")
+def format_search_result(result: SearchResult) -> list[str]:
+    query = clean_text(result.original_query)
+    if not result.normalized_query:
+        return ["❌ Введите номер или артикул, содержащий буквы или цифры."]
 
-print(f"✅ JRN-база: {len(jrone_norm_to_art)} уникальных нормализованных JRN-номеров.")
+    if not result.matches:
+        return [f"❌ Ничего не найдено по запросу {query}."]
 
-# ---------- Загрузка базы OEM-кроссов (oemcross.csv) ----------
-oem_norm_to_art = defaultdict(set)   # нормализованный OEM -> множество артикулов
-
-try:
-    with open(OEM_FILE, mode='r', encoding='utf-8-sig') as file:
-        reader = csv.reader(file, delimiter=';')
-        for row in reader:
-            if len(row) >= 2:
-                art = clean_text(row[0])
-                oem = clean_text(row[1])
-                if art and oem:
-                    norm = normalize(oem)
-                    oem_norm_to_art[norm].add(art)
-except FileNotFoundError:
-    print("⚠️ Файл oemcross.csv не найден, поиск по OEM-номерам недоступен.")
-except Exception as e:
-    print(f"❌ Ошибка загрузки {OEM_FILE}: {e}")
-
-print(f"✅ OEM-база: {len(oem_norm_to_art)} уникальных нормализованных OEM-номеров.")
-
-# ---------- Загрузка базы FLP-кроссов (flp.csv) ----------
-flp_norm_to_art = defaultdict(set)   # нормализованный FLP номер -> множество артикулов
-art_norm_to_flp = defaultdict(set)   # нормализованный артикул -> множество FLP номеров
-
-try:
-    with open(FLP_FILE, mode='r', encoding='utf-8-sig') as file:
-        reader = csv.reader(file, delimiter=';')
-        for row in reader:
-            if len(row) >= 2:
-                art = clean_text(row[0])
-                flp = clean_text(row[1])
-                if art and flp:
-                    norm_flp = normalize(flp)
-                    norm_art = normalize(art)
-                    flp_norm_to_art[norm_flp].add(art)
-                    art_norm_to_flp[norm_art].add(flp)
-except FileNotFoundError:
-    print("⚠️ Файл flp.csv не найден, поиск по FLP-номерам недоступен.")
-except Exception as e:
-    print(f"❌ Ошибка загрузки {FLP_FILE}: {e}")
-
-print(f"✅ FLP-база: {len(flp_norm_to_art)} уникальных FLP-номеров, {len(art_norm_to_flp)} уникальных артикулов.")
-
-# ---------- Функция частичного поиска в основной базе ----------
-def partial_search_main(search_norm):
-    results = set()
-    for norm_key, original_keys in col1_norm_to_original.items():
-        if search_norm in norm_key:
-            for orig_key in original_keys:
-                for val in dict_by_col1[orig_key]:
-                    results.add(val)
-    for norm_key, original_keys in col2_norm_to_original.items():
-        if search_norm in norm_key:
-            for orig_key in original_keys:
-                for val in dict_by_col2[orig_key]:
-                    results.add(val)
-    return results
-
-# ---------- Вспомогательная функция для форматирования артикула со связями ----------
-def format_art_with_links(art):
-    if art in dict_by_col1:
-        eee_list = sorted(set(dict_by_col1[art]))
-        return f"• {art} → {', '.join(eee_list)}"
-    elif art in dict_by_col2:
-        turbo_list = sorted(set(dict_by_col2[art]))
-        return f"• {art} → {', '.join(turbo_list)}"
+    if result.fallback_used:
+        heading = (
+            f"🔎 По запросу {query} ничего не найдено. "
+            f"Использован вариант {result.matched_query}:"
+        )
+    elif result.exact:
+        heading = f"🔎 Найденные артикулы для {query}:"
     else:
-        return f"• {art} (нет в основной базе)"
+        heading = f"🔎 Совпадения по части номера {query}:"
 
-# ---------- Обработчики ----------
-async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    lines = [heading]
+    for match in result.matches:
+        meaningful_categories = [
+            category for category in match.categories if category != "Прочее"
+        ]
+        category_suffix = (
+            f" — {', '.join(meaningful_categories)}"
+            if meaningful_categories
+            else ""
+        )
+        lines.append(f"• {match.article}{category_suffix}")
+
+    if result.truncated:
+        lines.extend(
+            [
+                "",
+                (
+                    f"Показаны первые {DEFAULT_RESULT_LIMIT} результатов. "
+                    "Введите более точный номер."
+                ),
+            ]
+        )
+    return lines
+
+
+def format_image_search_results(
+    matches: tuple[ImageSearchMatch, ...],
+) -> list[str]:
+    if not matches:
+        return [
+            "❌ На изображении не найден номер из базы.",
+            "Сфотографируйте шильдик крупнее, без бликов и размытия.",
+        ]
+
+    lines = ["📷 Распознанные номера:"]
+    seen_numbers: set[tuple[str, str]] = set()
+    articles: dict[str, set[str]] = {}
+    truncated = False
+
+    for image_match in matches:
+        recognized = image_match.recognized_value
+        searched = image_match.searched_value
+        number_key = (normalize_number(recognized), normalize_number(searched))
+        if number_key not in seen_numbers:
+            seen_numbers.add(number_key)
+            if normalize_number(recognized) == normalize_number(searched):
+                lines.append(f"• {recognized}")
+            else:
+                lines.append(f"• {recognized} → {searched}")
+
+        for article_match in image_match.result.matches:
+            meaningful_categories = {
+                category
+                for category in article_match.categories
+                if category != "Прочее"
+            }
+            articles.setdefault(article_match.article, set()).update(
+                meaningful_categories
+            )
+        truncated = truncated or image_match.result.truncated
+
+    lines.extend(["", "🔎 Найденные артикулы:"])
+    for article, categories in articles.items():
+        category_suffix = (
+            f" — {', '.join(sorted(categories))}" if categories else ""
+        )
+        lines.append(f"• {article}{category_suffix}")
+
+    if truncated:
+        lines.append(f"Показаны первые {DEFAULT_RESULT_LIMIT} результатов.")
+    return lines
+
+
+def split_long_message(
+    lines: list[str], *, limit: int = TELEGRAM_MESSAGE_LIMIT
+) -> list[str]:
+    chunks: list[str] = []
+    current: list[str] = []
+    current_length = 0
+
+    for original_line in lines:
+        line = original_line
+        if len(line) > limit:
+            line = f"{line[: limit - 1]}…"
+
+        added_length = len(line) + (1 if current else 0)
+        if current and current_length + added_length > limit:
+            chunks.append("\n".join(current))
+            current = [line]
+            current_length = len(line)
+        else:
+            current.append(line)
+            current_length += added_length
+
+    if current:
+        chunks.append("\n".join(current))
+    return chunks
+
+
+async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    if update.message is None:
+        return
+
     emoji_id = "5247029251940586192"
     welcome_text = (
-        f"<tg-emoji emoji-id=\"{emoji_id}\">😊</tg-emoji> ТУРБОНАЙЗЕР бот приветствует!\n"
-        "Введите E&E P/N, Turbo P/N, OEM номер или JRN-номер\n\n"
-        "Пример: CT-VNT11B или 17201-52010\n\n"
-        f"🔍 Можно искать по части номера (минимум {MIN_SEARCH_LENGTH} символа).\n"
-        "Дефисы можно не ставить – бот поймёт.\n"
-        "Также бот понимает русские буквы, похожие на латинские (например, Е = E, Н = H)."
+        f'<tg-emoji emoji-id="{emoji_id}">😊</tg-emoji> '
+        "ТУРБОНАЙЗЕР бот приветствует!\n"
+        "Введите E&E P/N, Turbo P/N, OEM, JRONE или FLP номер.\n\n"
+        "Пример: 17201-52010 или 1000-010-006\n\n"
+        "Также можно отправить фотографию шильдика или номера.\n\n"
+        f"Можно искать по части номера — минимум "
+        f"{MIN_PARTIAL_SEARCH_LENGTH} символа. "
+        "Дефисы, пробелы и регистр не имеют значения."
     )
-    await update.message.reply_text(welcome_text, parse_mode='HTML')
+    await update.message.reply_text(welcome_text, parse_mode="HTML")
 
-async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
+
+async def handle_message(
+    update: Update, context: ContextTypes.DEFAULT_TYPE
+) -> None:
+    if update.message is None or update.message.text is None:
+        return
+
     user_input = clean_text(update.message.text)
     if not user_input:
         return
 
-    user_input_norm = normalize(user_input)
-    input_len = len(user_input_norm)
+    try:
+        result = await asyncio.to_thread(DATABASE.search, user_input)
+    except (OSError, sqlite3.Error, RuntimeError):
+        logger.exception("Ошибка поиска в SQLite")
+        await update.message.reply_text(
+            "❌ База данных временно недоступна. Попробуйте ещё раз позже."
+        )
+        return
 
-    # Списки для результатов из разных источников
-    main_lines = []      # строки из основной базы data.csv
-    jrone_lines = []     # строки из JRN (артикулы со связями)
-    oem_lines = []       # строки из OEM (просто артикулы)
-    flp_lines = []       # строки из FLP (артикулы или номера)
+    for chunk in split_long_message(format_search_result(result)):
+        await update.message.reply_text(chunk)
 
-    # ------------------ ПОИСК В ОСНОВНОЙ БАЗЕ (data.csv) ------------------
-    if input_len < MIN_SEARCH_LENGTH:
-        # Точный поиск
-        if user_input_norm in col2_norm_to_original:
-            for key in col2_norm_to_original[user_input_norm]:
-                for val in dict_by_col2[key]:
-                    main_lines.append(f"• {val}")
-        elif user_input_norm in col1_norm_to_original:
-            for key in col1_norm_to_original[user_input_norm]:
-                for val in dict_by_col1[key]:
-                    main_lines.append(f"• {val}")
+
+async def handle_image(
+    update: Update, context: ContextTypes.DEFAULT_TYPE
+) -> None:
+    message = update.message
+    if message is None:
+        return
+
+    if message.photo:
+        file_id = message.photo[-1].file_id
+        suffix = ".jpg"
+    elif message.document is not None:
+        file_id = message.document.file_id
+        suffix = Path(message.document.file_name or "image.jpg").suffix or ".jpg"
     else:
-        # Частичный поиск
-        results = partial_search_main(user_input_norm)
-        for val in sorted(results):
-            main_lines.append(f"• {val}")
+        return
 
-        # Если ничего не найдено, пробуем заменить среднюю часть на 970 для 11-значных номеров
-        if not results and is_11_digit_number(user_input_norm):
-            first4 = user_input_norm[:4]
-            middle3 = user_input_norm[4:7]
-            last4 = user_input_norm[7:]
-            if middle3 != '970':
-                new_norm = first4 + '970' + last4
-                results = partial_search_main(new_norm)
-                for val in sorted(results):
-                    main_lines.append(f"• {val}")
+    try:
+        telegram_file = await context.bot.get_file(file_id)
+        with tempfile.TemporaryDirectory(prefix="turbo_ocr_") as temp_dir:
+            image_path = Path(temp_dir) / f"image{suffix.lower()}"
+            await telegram_file.download_to_drive(custom_path=image_path)
+            candidates = await asyncio.to_thread(
+                OCR_RECOGNIZER.recognize, image_path
+            )
+            matches = await asyncio.to_thread(
+                search_image_candidates, DATABASE, candidates
+            )
+    except OcrUnavailableError:
+        logger.exception("OCR-компонент не установлен")
+        await message.reply_text(
+            "❌ Поиск по изображению пока недоступен: OCR не установлен."
+        )
+        return
+    except (OSError, RuntimeError, sqlite3.Error, TelegramError):
+        logger.exception("Ошибка обработки изображения")
+        await message.reply_text(
+            "❌ Не удалось обработать изображение. "
+            "Попробуйте другое фото без бликов и размытия."
+        )
+        return
 
-    # ------------------ ПОИСК В JRN ------------------
-    jrone_arts = set()
-    if input_len < MIN_SEARCH_LENGTH:
-        if user_input_norm in jrone_norm_to_art:
-            jrone_arts = jrone_norm_to_art[user_input_norm]
+    if not candidates:
+        lines = [
+            "❌ Не удалось распознать номер на изображении.",
+            "Сфотографируйте шильдик крупнее, без бликов и размытия.",
+        ]
     else:
-        for norm_key, arts in jrone_norm_to_art.items():
-            if user_input_norm in norm_key:
-                jrone_arts.update(arts)
+        lines = format_image_search_results(matches)
 
-    for art in sorted(jrone_arts):
-        jrone_lines.append(format_art_with_links(art))
+    for chunk in split_long_message(lines):
+        await message.reply_text(chunk)
 
-    # ------------------ ПОИСК В OEM ------------------
-    oem_arts = set()
-    if input_len < MIN_SEARCH_LENGTH:
-        if user_input_norm in oem_norm_to_art:
-            oem_arts = oem_norm_to_art[user_input_norm]
-    else:
-        for norm_key, arts in oem_norm_to_art.items():
-            if user_input_norm in norm_key:
-                oem_arts.update(arts)
 
-    for art in sorted(oem_arts):
-        oem_lines.append(f"• {art}")
+def main() -> None:
+    if not API_TOKEN:
+        raise ValueError("❌ Переменная окружения API_TOKEN не задана!")
 
-    # ------------------ ПОИСК В FLP (двунаправленный) ------------------
-    flp_arts = set()
-    flp_nums = set()
-    # Ищем как FLP номер -> артикулы
-    if input_len < MIN_SEARCH_LENGTH:
-        if user_input_norm in flp_norm_to_art:
-            flp_arts = flp_norm_to_art[user_input_norm]
-    else:
-        for norm_key, arts in flp_norm_to_art.items():
-            if user_input_norm in norm_key:
-                flp_arts.update(arts)
+    stats = DATABASE.validate()
+    logger.info(
+        "SQLite загружена: %s артикулов, %s номеров, %s кроссов, %s источников",
+        stats.parts,
+        stats.numbers,
+        stats.crossrefs,
+        stats.sources,
+    )
 
-    # Ищем как артикул -> FLP номера
-    if input_len < MIN_SEARCH_LENGTH:
-        if user_input_norm in art_norm_to_flp:
-            flp_nums = art_norm_to_flp[user_input_norm]
-    else:
-        for norm_key, nums in art_norm_to_flp.items():
-            if user_input_norm in norm_key:
-                flp_nums.update(nums)
-
-    # Собираем строки для FLP
-    for art in sorted(flp_arts):
-        flp_lines.append(f"• FLP артикул: {art}")
-    for num in sorted(flp_nums):
-        flp_lines.append(f"• FLP номер: {num}")
-
-    # ------------------ ФОРМИРОВАНИЕ ОТВЕТА (без заголовков) ------------------
-    answer_lines = []
-    # Основная база всегда первой
-    if main_lines:
-        answer_lines.extend(main_lines)
-    # Добавляем JRN, если есть
-    if jrone_lines:
-        if answer_lines:
-            answer_lines.append("")  # пустая строка для разделения блоков
-        answer_lines.extend(jrone_lines)
-    # Добавляем OEM
-    if oem_lines:
-        if answer_lines and not (answer_lines[-1] == ""):
-            answer_lines.append("")
-        answer_lines.extend(oem_lines)
-    # Добавляем FLP
-    if flp_lines:
-        if answer_lines and not (answer_lines[-1] == ""):
-            answer_lines.append("")
-        answer_lines.extend(flp_lines)
-
-    # Если ничего не найдено
-    if not answer_lines:
-        answer_lines.append(f"❌ Ничего не найдено по запросу `{user_input}`.")
-
-    await update.message.reply_text("\n".join(answer_lines))
-
-def main():
     app = Application.builder().token(API_TOKEN).build()
     app.add_handler(CommandHandler("start", start))
+    app.add_handler(
+        MessageHandler(filters.PHOTO | filters.Document.IMAGE, handle_image)
+    )
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message))
 
-    print("🚀 ТУРБОНАЙЗЕР бот с приоритетом data.csv и объединёнными результатами без заголовков запущен...")
+    logger.info("ТУРБОНАЙЗЕР запущен. Основной источник: %s", DATABASE.path)
     app.run_polling()
 
-if __name__ == '__main__':
+
+if __name__ == "__main__":
     main()
