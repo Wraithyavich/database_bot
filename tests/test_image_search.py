@@ -19,6 +19,18 @@ DATABASE_PATH = PROJECT_DIR / "turbo_search.sqlite"
 
 
 class CandidateExtractionTests(unittest.TestCase):
+    def test_reports_engine_initialization_error(self) -> None:
+        def broken_engine():
+            raise RuntimeError("backend is unavailable")
+
+        fake_module = SimpleNamespace(RapidOCR=broken_engine)
+        with patch.dict("sys.modules", {"rapidocr": fake_module}):
+            with self.assertRaisesRegex(
+                RuntimeError,
+                "backend is unavailable",
+            ):
+                RapidOcrRecognizer().check_available()
+
     def test_recognizer_reads_current_rapidocr_output(self) -> None:
         class FakeEngine:
             def __call__(self, image_path: str):

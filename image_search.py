@@ -84,18 +84,21 @@ class RapidOcrRecognizer:
         if self._engine is not None:
             return self._engine
 
-        try:
-            from rapidocr import RapidOCR
-        except ImportError as error:
-            raise OcrUnavailableError(
-                "OCR не установлен. Выполните: "
-                "python -m pip install -r requirements.txt"
-            ) from error
-
         with self._lock:
             if self._engine is None:
-                self._engine = RapidOCR()
+                try:
+                    from rapidocr import RapidOCR
+
+                    self._engine = RapidOCR()
+                except Exception as error:
+                    raise OcrUnavailableError(
+                        "Не удалось загрузить RapidOCR "
+                        f"({type(error).__name__}: {error})"
+                    ) from error
         return self._engine
+
+    def check_available(self) -> None:
+        self._get_engine()
 
     def recognize(self, image_path: str | Path) -> tuple[OcrCandidate, ...]:
         engine = self._get_engine()

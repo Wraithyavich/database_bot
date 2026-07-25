@@ -17,6 +17,15 @@ RapidOCR работает локально через ONNX. Для сервер�
 rapidocr download_models
 ```
 
+Для серверного развёртывания рекомендуется использовать `Dockerfile`: он
+устанавливает системные библиотеки OpenCV и проверяет инициализацию RapidOCR
+ещё во время сборки контейнера.
+
+```powershell
+docker build -t database-bot .
+docker run --rm -e API_TOKEN="токен Telegram-бота" database-bot
+```
+
 ## Запуск
 
 ```powershell

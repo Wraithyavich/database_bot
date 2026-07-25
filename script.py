@@ -249,9 +249,10 @@ async def handle_image(
                 search_image_candidates, DATABASE, candidates
             )
     except OcrUnavailableError:
-        logger.exception("OCR-компонент не установлен")
+        logger.exception("OCR-компонент не удалось загрузить")
         await message.reply_text(
-            "❌ Поиск по изображению пока недоступен: OCR не установлен."
+            "❌ Поиск по изображению временно недоступен: "
+            "OCR-компонент не запустился."
         )
         return
     except (OSError, RuntimeError, sqlite3.Error, TelegramError):
@@ -294,6 +295,16 @@ def main() -> None:
             database_path,
         )
         DATABASE = TurboDatabase(database_path)
+
+    try:
+        OCR_RECOGNIZER.check_available()
+    except OcrUnavailableError:
+        logger.exception(
+            "OCR не запустился. Текстовый поиск продолжит работать, "
+            "но поиск по изображению будет недоступен."
+        )
+    else:
+        logger.info("OCR успешно загружен")
 
     stats = DATABASE.validate()
     logger.info(

@@ -1,0 +1,13 @@
+.git
+.github
+.idea
+.venv
+venv
+__pycache__
+*.py[cod]
+*.sqlite-shm
+*.sqlite-wal
+
+tests
+*.csv
+turbo_parts.sqlite
