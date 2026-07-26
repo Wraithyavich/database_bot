@@ -8,10 +8,12 @@ from unittest.mock import patch
 from turbo_database import TurboDatabase
 from vin_search import (
     NhtsaVinDecoder,
+    VinFitment,
     VinRecord,
     VinSource,
     VinStore,
     extract_vin,
+    format_online_vin,
     format_pending_vin,
     format_verified_vin,
 )
@@ -84,6 +86,29 @@ class VinStoreTests(unittest.TestCase):
         self.assertEqual(record.status, "verified")
         self.assertEqual(record.make, "Land Rover")
 
+    def test_persists_preliminary_online_result(self) -> None:
+        unknown_vin = "SALWR2VF0FA000001"
+        preliminary = VinRecord(
+            vin=unknown_vin,
+            status="pending",
+            fitments=(
+                VinFitment(
+                    position="Левая",
+                    oem_numbers=("LR012345",),
+                    turbo_numbers=("778400-0003",),
+                    articles=("GT17-092-1",),
+                    evidence="Каталожное совпадение.",
+                ),
+            ),
+            online_search_at="2026-07-26T00:00:00+00:00",
+            online_search_provider="Gemini + Google Search",
+        )
+
+        self.store.record_request(unknown_vin, decoded=preliminary)
+        stored = self.store.lookup(unknown_vin)
+
+        self.assertEqual(stored, preliminary)
+
     def test_seed_articles_exist_for_stored_turbo_numbers(self) -> None:
         record = self.store.lookup(KNOWN_VIN)
         self.assertIsNotNone(record)
@@ -153,6 +178,34 @@ class VinFormattingTests(unittest.TestCase):
 
         self.assertIn("очереди на проверку", message)
         self.assertNotIn("Turbo P/N", message)
+
+    def test_formats_online_result_as_unverified(self) -> None:
+        record = VinRecord(
+            vin="SALWR2VF0FA000001",
+            status="pending",
+            make="LAND ROVER",
+            fitments=(
+                VinFitment(
+                    position="Левая",
+                    oem_numbers=("LR012345",),
+                    turbo_numbers=("778400-0003",),
+                    articles=("GT17-092-1",),
+                    evidence="Найдено в открытом каталоге.",
+                ),
+            ),
+            sources=(
+                VinSource("Parts catalog", "https://example.test/fitment"),
+            ),
+            online_search_at="2026-07-26T00:00:00+00:00",
+        )
+
+        message = "\n".join(format_online_vin(record))
+
+        self.assertIn("ПРЕДВАРИТЕЛЬНЫЙ", message)
+        self.assertIn("778400-0003", message)
+        self.assertIn("GT17-092-1", message)
+        self.assertIn("могут быть неточными", message)
+        self.assertIn("https://example.test/fitment", message)
 
 
 if __name__ == "__main__":

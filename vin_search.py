@@ -31,6 +31,7 @@ class VinFitment:
     oem_numbers: tuple[str, ...]
     turbo_numbers: tuple[str, ...]
     articles: tuple[str, ...]
+    evidence: str = ""
 
 
 @dataclass(frozen=True)
@@ -52,6 +53,8 @@ class VinRecord:
     sources: tuple[VinSource, ...] = ()
     notes: str = ""
     verified_at: str = ""
+    online_search_at: str = ""
+    online_search_provider: str = ""
 
 
 @dataclass(frozen=True)
@@ -156,6 +159,84 @@ def format_pending_vin(record: VinRecord, *, decoder_failed: bool = False) -> li
         lines.append(
             "Базовый VIN-декодер временно недоступен, но заявка сохранена."
         )
+    return lines
+
+
+def format_online_vin(record: VinRecord) -> list[str]:
+    lines = [
+        "⚠️ ПРЕДВАРИТЕЛЬНЫЙ результат поиска в интернете",
+        f"VIN: {record.vin}",
+    ]
+
+    vehicle_parts = [part for part in (record.make, record.model) if part]
+    if vehicle_parts:
+        lines.append(f"Автомобиль: {' '.join(vehicle_parts)}")
+
+    details = " / ".join(
+        part
+        for part in (
+            record.model_year,
+            record.engine,
+            f"{record.power_kw} кВт" if record.power_kw else "",
+        )
+        if part
+    )
+    if details:
+        lines.append(f"Год / двигатель: {details}")
+    if record.online_search_provider:
+        lines.append(f"Поиск: {record.online_search_provider}")
+
+    if record.fitments:
+        lines.extend(["", "Возможные номера турбокомпрессоров:"])
+        for fitment in record.fitments:
+            lines.append(f"• {fitment.position}")
+            if fitment.oem_numbers:
+                lines.append(f"  OEM: {', '.join(fitment.oem_numbers)}")
+            if fitment.turbo_numbers:
+                lines.append(f"  Turbo P/N: {', '.join(fitment.turbo_numbers)}")
+            if fitment.articles:
+                lines.append(
+                    "  Возможные картриджи из нашей базы: "
+                    f"{', '.join(fitment.articles)}"
+                )
+            if fitment.evidence:
+                lines.append(f"  Основание: {fitment.evidence}")
+
+        if not any(fitment.articles for fitment in record.fitments):
+            lines.extend(
+                [
+                    "",
+                    "В нашей базе точных совпадений по найденным номерам нет.",
+                ]
+            )
+    else:
+        lines.extend(
+            [
+                "",
+                "Онлайн-поиск выполнен, но достаточно обоснованные номера "
+                "турбин не найдены.",
+            ]
+        )
+
+    if record.notes:
+        lines.extend(["", f"Комментарий поиска: {record.notes}"])
+
+    if record.sources:
+        lines.extend(["", "Источники:"])
+        for index, source in enumerate(record.sources, start=1):
+            lines.append(f"{index}. {source.label}: {source.url}")
+
+    lines.extend(
+        [
+            "",
+            "⚠️ ВАЖНО: результат сформирован автоматически по информации "
+            "из интернета. Номера могут быть неточными или относиться к другой "
+            "комплектации.",
+            "Перед заказом обязательно перепроверьте номер на шильдике "
+            "установленной турбины или в официальном каталоге по VIN.",
+            "VIN сохранён в очереди на ручную проверку.",
+        ]
+    )
     return lines
 
 
@@ -440,6 +521,7 @@ def _record_to_dict(record: VinRecord) -> dict[str, Any]:
                 "oem_numbers": list(fitment.oem_numbers),
                 "turbo_numbers": list(fitment.turbo_numbers),
                 "articles": list(fitment.articles),
+                "evidence": fitment.evidence,
             }
             for fitment in record.fitments
         ],
@@ -449,6 +531,8 @@ def _record_to_dict(record: VinRecord) -> dict[str, Any]:
         ],
         "notes": record.notes,
         "verified_at": record.verified_at,
+        "online_search_at": record.online_search_at,
+        "online_search_provider": record.online_search_provider,
     }
 
 
@@ -468,6 +552,7 @@ def _record_from_dict(raw: Any) -> VinRecord:
             oem_numbers=_string_tuple(item.get("oem_numbers")),
             turbo_numbers=_string_tuple(item.get("turbo_numbers")),
             articles=_string_tuple(item.get("articles")),
+            evidence=str(item.get("evidence", "")).strip(),
         )
         for item in raw.get("fitments", [])
         if isinstance(item, dict)
@@ -492,6 +577,10 @@ def _record_from_dict(raw: Any) -> VinRecord:
         sources=sources,
         notes=str(raw.get("notes", "")).strip(),
         verified_at=str(raw.get("verified_at", "")).strip(),
+        online_search_at=str(raw.get("online_search_at", "")).strip(),
+        online_search_provider=str(
+            raw.get("online_search_provider", "")
+        ).strip(),
     )
 
 

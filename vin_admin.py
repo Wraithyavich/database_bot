@@ -38,14 +38,32 @@ def main() -> None:
         return
 
     for record in store.pending(limit=args.limit):
+        candidate_numbers = sorted(
+            {
+                number
+                for fitment in record.fitments
+                for number in (*fitment.oem_numbers, *fitment.turbo_numbers)
+            }
+        )
+        search_state = (
+            f"online={record.online_search_at}"
+            if record.online_search_at
+            else "online=not-searched"
+        )
         details = " | ".join(
             value
             for value in (
                 record.vin,
+                search_state,
                 record.make,
                 record.model,
                 record.model_year,
                 record.engine,
+                (
+                    f"candidates={','.join(candidate_numbers)}"
+                    if candidate_numbers
+                    else ""
+                ),
             )
             if value
         )
