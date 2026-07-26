@@ -796,8 +796,10 @@ def _select_yandex_result_sources(
             "/images"
         ):
             continue
-        text = _hit_text(hit).upper()
-        if any(term in text for term in exact_terms):
+        identity_text = " ".join(
+            (hit.get("title", ""), hit.get("url", ""))
+        ).upper()
+        if any(term in identity_text for term in exact_terms):
             selected_urls.append(hit["url"])
 
     sources: list[VinSource] = []
