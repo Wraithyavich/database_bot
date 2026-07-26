@@ -40,8 +40,15 @@ from vin_search import (
     VinRecord,
     VinStore,
     extract_vin,
+    format_online_vin,
     format_pending_vin,
     format_verified_vin,
+)
+from vin_online_search import (
+    DEFAULT_GEMINI_MODEL,
+    GeminiVinSearcher,
+    VinOnlineSearchError,
+    attach_catalog_articles,
 )
 
 
@@ -97,9 +104,14 @@ DATABASE = TurboDatabase(resolve_database_path())
 OCR_RECOGNIZER = RapidOcrRecognizer()
 VIN_STORE = VinStore(resolve_vin_database_path())
 VIN_DECODER = NhtsaVinDecoder()
+VIN_ONLINE_SEARCHER = GeminiVinSearcher(
+    os.environ.get("GEMINI_API_KEY"),
+    model=os.environ.get("GEMINI_MODEL", DEFAULT_GEMINI_MODEL),
+)
 VIN_SEARCH_READY = False
 TELEGRAM_MESSAGE_LIMIT = 4000
 OCR_SEMAPHORE = asyncio.Semaphore(1)
+VIN_ONLINE_SEMAPHORE = asyncio.Semaphore(1)
 USER_IMAGE_RATE_LIMITER = SlidingWindowRateLimiter(
     limit=3,
     window_seconds=60,
@@ -122,13 +134,18 @@ GLOBAL_TEXT_RATE_LIMITER = SlidingWindowRateLimiter(
     window_seconds=60,
     max_keys=1,
 )
-USER_NEW_VIN_RATE_LIMITER = SlidingWindowRateLimiter(
+USER_VIN_ONLINE_RATE_LIMITER = SlidingWindowRateLimiter(
     limit=3,
     window_seconds=600,
 )
-GLOBAL_NEW_VIN_RATE_LIMITER = SlidingWindowRateLimiter(
-    limit=20,
+GLOBAL_VIN_ONLINE_RATE_LIMITER = SlidingWindowRateLimiter(
+    limit=10,
     window_seconds=600,
+    max_keys=1,
+)
+DAILY_VIN_ONLINE_RATE_LIMITER = SlidingWindowRateLimiter(
+    limit=200,
+    window_seconds=86_400,
     max_keys=1,
 )
 
@@ -265,7 +282,8 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         "ТУРБОНАЙЗЕР бот приветствует!\n"
         "Введите E&E P/N, Turbo P/N, OEM, JRONE или FLP номер.\n\n"
         "Пример: 17201-52010 или 1000-010-006\n\n"
-        "Для проверенного подбора можно отправить 17-значный VIN.\n\n"
+        "Можно отправить 17-значный VIN: бот проверит базу и при необходимости "
+        "выполнит предварительный поиск в интернете.\n\n"
         "Также можно отправить фотографию шильдика или номера.\n\n"
         f"Можно искать по части номера — минимум "
         f"{MIN_PARTIAL_SEARCH_LENGTH} символа. "
@@ -296,20 +314,8 @@ async def handle_vin_query(
             lines = format_verified_vin(record)
         else:
             decoder_failed = False
+            online_search_note = ""
             if record is None:
-                user_limit = USER_NEW_VIN_RATE_LIMITER.allow(rate_limit_key)
-                global_limit = GLOBAL_NEW_VIN_RATE_LIMITER.allow("global")
-                if not user_limit.allowed or not global_limit.allowed:
-                    retry_after = max(
-                        user_limit.retry_after,
-                        global_limit.retry_after,
-                    )
-                    await message.reply_text(
-                        "⏳ Слишком много новых VIN-запросов. "
-                        f"Повторите примерно через {retry_after} сек."
-                    )
-                    return
-
                 try:
                     record = await asyncio.to_thread(VIN_DECODER.decode, vin)
                 except VinDecoderError:
@@ -321,16 +327,96 @@ async def handle_vin_query(
                     decoder_failed = True
                     record = VinRecord(vin=vin, status="pending")
 
+            if not record.online_search_at:
+                if not VIN_ONLINE_SEARCHER.enabled:
+                    online_search_note = (
+                        "Онлайн-поиск пока не настроен администратором."
+                    )
+                else:
+                    user_limit = USER_VIN_ONLINE_RATE_LIMITER.allow(
+                        rate_limit_key
+                    )
+                    global_limit = (
+                        GLOBAL_VIN_ONLINE_RATE_LIMITER.allow("global")
+                        if user_limit.allowed
+                        else None
+                    )
+                    daily_limit = (
+                        DAILY_VIN_ONLINE_RATE_LIMITER.allow("global")
+                        if user_limit.allowed
+                        and global_limit is not None
+                        and global_limit.allowed
+                        else None
+                    )
+                    limits = tuple(
+                        limit
+                        for limit in (user_limit, global_limit, daily_limit)
+                        if limit is not None
+                    )
+                    denied = tuple(
+                        limit for limit in limits if not limit.allowed
+                    )
+                    if denied:
+                        retry_after = max(
+                            limit.retry_after for limit in denied
+                        )
+                        online_search_note = (
+                            "Лимит онлайн-поиска достигнут. "
+                            f"Повторите примерно через {retry_after} сек."
+                        )
+                    else:
+                        acquired = False
+                        try:
+                            await asyncio.wait_for(
+                                VIN_ONLINE_SEMAPHORE.acquire(),
+                                timeout=0.05,
+                            )
+                            acquired = True
+                        except TimeoutError:
+                            online_search_note = (
+                                "Онлайн-поиск занят другим VIN. "
+                                "Повторите запрос немного позже."
+                            )
+
+                        if acquired:
+                            try:
+                                record = await asyncio.to_thread(
+                                    VIN_ONLINE_SEARCHER.search,
+                                    record,
+                                )
+                                record = await asyncio.to_thread(
+                                    attach_catalog_articles,
+                                    record,
+                                    DATABASE,
+                                )
+                            except VinOnlineSearchError:
+                                logger.warning(
+                                    "Онлайн-поиск не выполнен для VIN …%s",
+                                    vin[-6:],
+                                    exc_info=True,
+                                )
+                                online_search_note = (
+                                    "Онлайн-поиск временно недоступен."
+                                )
+                            finally:
+                                VIN_ONLINE_SEMAPHORE.release()
+
             record = await asyncio.to_thread(
                 VIN_STORE.record_request,
                 vin,
                 decoded=record,
             )
-            lines = (
-                format_verified_vin(record)
-                if record.status == "verified"
-                else format_pending_vin(record, decoder_failed=decoder_failed)
-            )
+            if record.status == "verified":
+                lines = format_verified_vin(record)
+            elif record.online_search_at:
+                lines = format_online_vin(record)
+            else:
+                lines = format_pending_vin(
+                    record,
+                    decoder_failed=decoder_failed,
+                )
+                if online_search_note:
+                    lines.extend(["", online_search_note])
     except (OSError, sqlite3.Error, RuntimeError, ValueError):
         logger.exception("Ошибка VIN-поиска для VIN …%s", vin[-6:])
         await message.reply_text(
@@ -566,6 +652,15 @@ def main() -> None:
             vin_stats.pending,
             vin_stats.requests,
         )
+        if VIN_ONLINE_SEARCHER.enabled:
+            logger.info(
+                "Онлайн-поиск VIN включён: %s + Google Search",
+                VIN_ONLINE_SEARCHER.model,
+            )
+        else:
+            logger.warning(
+                "Онлайн-поиск VIN выключен: GEMINI_API_KEY не задан"
+            )
 
     update_queue: asyncio.Queue[object] = asyncio.Queue(maxsize=UPDATE_QUEUE_SIZE)
     app = (
