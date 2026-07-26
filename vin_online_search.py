@@ -103,6 +103,23 @@ class YandexVinSearcher:
             for hit in query_hits:
                 hit["query"] = query
             hits.extend(query_hits)
+
+        identity_hits = _vin_identity_hits(hits, vin=vin)
+        if not identity_hits:
+            return _build_online_record(
+                {
+                    "summary": (
+                        "Yandex Search не нашёл открытых страниц, "
+                        "где этот VIN или его модельный префикс "
+                        "связан с автомобилем."
+                    )
+                },
+                base_record=base_record,
+                vin=vin,
+                sources=(),
+                provider=self.provider_name,
+            )
+
         for query in _build_yandex_supplemental_queries(
             hits,
             vin=vin,
@@ -786,21 +803,9 @@ def _select_yandex_result_sources(
                 if url in hit_by_url:
                     selected_urls.append(url)
 
-    vin = vin.upper()
-    exact_terms = tuple(
-        term for term in (vin, vin[:11] if vin else "") if term
+    selected_urls.extend(
+        hit["url"] for hit in _vin_identity_hits(hits, vin=vin)
     )
-    for hit in hits:
-        parsed = urllib.parse.urlsplit(hit["url"])
-        if parsed.netloc.endswith("yandex.ru") and parsed.path.startswith(
-            "/images"
-        ):
-            continue
-        identity_text = " ".join(
-            (hit.get("title", ""), hit.get("url", ""))
-        ).upper()
-        if any(term in identity_text for term in exact_terms):
-            selected_urls.append(hit["url"])
 
     sources: list[VinSource] = []
     seen: set[str] = set()
@@ -819,6 +824,28 @@ def _select_yandex_result_sources(
         if len(sources) >= MAX_GROUNDING_SOURCES:
             break
     return tuple(sources)
+
+
+def _vin_identity_hits(
+    hits: list[dict[str, str]],
+    *,
+    vin: str,
+) -> tuple[dict[str, str], ...]:
+    vin = vin.upper()
+    terms = (vin, vin[:11])
+    selected: list[dict[str, str]] = []
+    for hit in hits:
+        parsed = urllib.parse.urlsplit(hit.get("url", ""))
+        if parsed.netloc.endswith("yandex.ru") and parsed.path.startswith(
+            "/images"
+        ):
+            continue
+        identity_text = " ".join(
+            (hit.get("title", ""), hit.get("url", ""))
+        ).upper()
+        if any(term in identity_text for term in terms):
+            selected.append(hit)
+    return tuple(selected)
 
 
 def _number_is_grounded(value: Any, text: str) -> bool:
