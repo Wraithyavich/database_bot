@@ -12,7 +12,7 @@ from turbo_database import TurboDatabase, normalize_number
 from vin_search import VinFitment, VinRecord, VinSource, extract_vin, utc_now
 
 
-DEFAULT_GEMINI_MODEL = "gemini-2.5-flash"
+DEFAULT_GEMINI_MODEL = "gemini-3.6-flash"
 GEMINI_API_URL = (
     "https://generativelanguage.googleapis.com/v1beta/models/"
     "{model}:generateContent"
@@ -75,7 +75,7 @@ class GeminiVinSearcher:
                     "tools": [{"google_search": {}}],
                     "generationConfig": {
                         "temperature": 0.1,
-                        "maxOutputTokens": 2048,
+                        "maxOutputTokens": 1024,
                     },
                 },
                 ensure_ascii=False,

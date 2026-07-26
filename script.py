@@ -135,16 +135,16 @@ GLOBAL_TEXT_RATE_LIMITER = SlidingWindowRateLimiter(
     max_keys=1,
 )
 USER_VIN_ONLINE_RATE_LIMITER = SlidingWindowRateLimiter(
-    limit=3,
+    limit=2,
     window_seconds=600,
 )
 GLOBAL_VIN_ONLINE_RATE_LIMITER = SlidingWindowRateLimiter(
-    limit=10,
+    limit=5,
     window_seconds=600,
     max_keys=1,
 )
 DAILY_VIN_ONLINE_RATE_LIMITER = SlidingWindowRateLimiter(
-    limit=200,
+    limit=20,
     window_seconds=86_400,
     max_keys=1,
 )
