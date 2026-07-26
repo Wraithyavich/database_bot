@@ -116,6 +116,26 @@ def resolve_unresolved_vin_database_path() -> Path:
     return path.resolve()
 
 
+def parse_allowed_user_ids(value: str | None) -> frozenset[int]:
+    if not value:
+        return frozenset()
+
+    allowed: set[int] = set()
+    for token in value.replace(",", " ").replace(";", " ").split():
+        try:
+            user_id = int(token)
+        except ValueError as error:
+            raise ValueError(
+                "VIN_ALLOWED_USER_IDS must contain Telegram numeric IDs"
+            ) from error
+        if user_id <= 0:
+            raise ValueError(
+                "VIN_ALLOWED_USER_IDS must contain positive Telegram IDs"
+            )
+        allowed.add(user_id)
+    return frozenset(allowed)
+
+
 DATABASE = TurboDatabase(resolve_database_path())
 OCR_RECOGNIZER = RapidOcrRecognizer()
 VIN_STORE = VinStore(resolve_vin_database_path())
@@ -139,6 +159,9 @@ GEMINI_VIN_SEARCHER = GeminiVinSearcher(
 VIN_ONLINE_SEARCHER = VinOnlineSearcherRouter(
     YANDEX_VIN_SEARCHER,
     GEMINI_VIN_SEARCHER,
+)
+VIN_ALLOWED_USER_IDS = parse_allowed_user_ids(
+    os.environ.get("VIN_ALLOWED_USER_IDS")
 )
 VIN_SEARCH_READY = False
 VIN_UNRESOLVED_READY = False
@@ -165,20 +188,6 @@ USER_TEXT_RATE_LIMITER = SlidingWindowRateLimiter(
 GLOBAL_TEXT_RATE_LIMITER = SlidingWindowRateLimiter(
     limit=180,
     window_seconds=60,
-    max_keys=1,
-)
-USER_VIN_ONLINE_RATE_LIMITER = SlidingWindowRateLimiter(
-    limit=2,
-    window_seconds=600,
-)
-GLOBAL_VIN_ONLINE_RATE_LIMITER = SlidingWindowRateLimiter(
-    limit=5,
-    window_seconds=600,
-    max_keys=1,
-)
-DAILY_VIN_ONLINE_RATE_LIMITER = SlidingWindowRateLimiter(
-    limit=20,
-    window_seconds=86_400,
     max_keys=1,
 )
 
@@ -328,8 +337,6 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
 async def handle_vin_query(
     update: Update,
     vin: str,
-    *,
-    rate_limit_key: object,
 ) -> None:
     message = update.message
     if message is None:
@@ -370,54 +377,17 @@ async def handle_vin_query(
                         "Онлайн-поиск пока не настроен администратором."
                     )
                 else:
-                    user_limit = USER_VIN_ONLINE_RATE_LIMITER.allow(
-                        rate_limit_key
-                    )
-                    global_limit = (
-                        GLOBAL_VIN_ONLINE_RATE_LIMITER.allow("global")
-                        if user_limit.allowed
-                        else None
-                    )
-                    daily_limit = (
-                        DAILY_VIN_ONLINE_RATE_LIMITER.allow("global")
-                        if user_limit.allowed
-                        and global_limit is not None
-                        and global_limit.allowed
-                        else None
-                    )
-                    limits = tuple(
-                        limit
-                        for limit in (user_limit, global_limit, daily_limit)
-                        if limit is not None
-                    )
-                    denied = tuple(
-                        limit for limit in limits if not limit.allowed
-                    )
-                    if denied:
-                        failure_code = "online_search_rate_limited"
-                        retry_after = max(
-                            limit.retry_after for limit in denied
+                    async with VIN_ONLINE_SEMAPHORE:
+                        latest = await asyncio.to_thread(
+                            VIN_STORE.lookup,
+                            vin,
                         )
-                        online_search_note = (
-                            "Лимит онлайн-поиска достигнут. "
-                            f"Повторите примерно через {retry_after} сек."
-                        )
-                    else:
-                        acquired = False
-                        try:
-                            await asyncio.wait_for(
-                                VIN_ONLINE_SEMAPHORE.acquire(),
-                                timeout=0.05,
-                            )
-                            acquired = True
-                        except TimeoutError:
-                            failure_code = "online_search_busy"
-                            online_search_note = (
-                                "Онлайн-поиск занят другим VIN. "
-                                "Повторите запрос немного позже."
-                            )
-
-                        if acquired:
+                        if latest is not None and (
+                            latest.status == "verified"
+                            or latest.online_search_at
+                        ):
+                            record = latest
+                        else:
                             try:
                                 record = await asyncio.to_thread(
                                     VIN_ONLINE_SEARCHER.search,
@@ -438,8 +408,6 @@ async def handle_vin_query(
                                 online_search_note = (
                                     "Онлайн-поиск временно недоступен."
                                 )
-                            finally:
-                                VIN_ONLINE_SEMAPHORE.release()
 
             record = await asyncio.to_thread(
                 VIN_STORE.record_request,
@@ -531,6 +499,18 @@ async def handle_message(
 
     user = update.effective_user
     rate_limit_key = user.id if user is not None else update.message.chat_id
+    vin = extract_vin(user_input)
+    if vin is not None:
+        if user is None or user.id not in VIN_ALLOWED_USER_IDS:
+            notice = RATE_LIMIT_NOTICE_LIMITER.allow(rate_limit_key)
+            if notice.allowed:
+                await update.message.reply_text(
+                    "🔒 Поиск по VIN доступен только допущенным пользователям."
+                )
+            return
+        await handle_vin_query(update, vin)
+        return
+
     user_limit = USER_TEXT_RATE_LIMITER.allow(rate_limit_key)
     if not user_limit.allowed:
         notice = RATE_LIMIT_NOTICE_LIMITER.allow(rate_limit_key)
@@ -547,15 +527,6 @@ async def handle_message(
             await update.message.reply_text(
                 "⏳ Бот временно перегружен. Повторите запрос немного позже."
             )
-        return
-
-    vin = extract_vin(user_input)
-    if vin is not None:
-        await handle_vin_query(
-            update,
-            vin,
-            rate_limit_key=rate_limit_key,
-        )
         return
 
     try:
@@ -771,6 +742,16 @@ def main() -> None:
             "База неразобранных VIN загружена: %s VIN, %s запросов",
             unresolved_stats.unique_vins,
             unresolved_stats.requests,
+        )
+
+    if VIN_ALLOWED_USER_IDS:
+        logger.info(
+            "Белый список VIN загружен: %s пользователей",
+            len(VIN_ALLOWED_USER_IDS),
+        )
+    else:
+        logger.warning(
+            "Белый список VIN пуст: VIN-поиск недоступен пользователям"
         )
 
     update_queue: asyncio.Queue[object] = asyncio.Queue(maxsize=UPDATE_QUEUE_SIZE)

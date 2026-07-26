@@ -14,6 +14,17 @@ PROJECT_DIR = Path(__file__).resolve().parents[1]
 
 
 class VinMessageRoutingTests(unittest.TestCase):
+    def setUp(self) -> None:
+        self.allowed_ids_patcher = patch.object(
+            script,
+            "VIN_ALLOWED_USER_IDS",
+            frozenset({456, 987654, 987655, 987656}),
+        )
+        self.allowed_ids_patcher.start()
+
+    def tearDown(self) -> None:
+        self.allowed_ids_patcher.stop()
+
     def test_verified_vin_is_routed_before_part_search(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
             store = VinStore(Path(temp_dir) / "vin.sqlite")
@@ -35,6 +46,20 @@ class VinMessageRoutingTests(unittest.TestCase):
                     script.DATABASE,
                     "search",
                     side_effect=AssertionError("part search must not run for VIN"),
+                ),
+                patch.object(
+                    script.USER_TEXT_RATE_LIMITER,
+                    "allow",
+                    side_effect=AssertionError(
+                        "VIN must bypass the text user rate limit"
+                    ),
+                ),
+                patch.object(
+                    script.GLOBAL_TEXT_RATE_LIMITER,
+                    "allow",
+                    side_effect=AssertionError(
+                        "VIN must bypass the global text rate limit"
+                    ),
                 ),
             ):
                 asyncio.run(script.handle_message(update, None))
@@ -198,6 +223,44 @@ class VinMessageRoutingTests(unittest.TestCase):
             "online_search_not_configured",
         )
         self.assertEqual(unresolved[0].make, "LAND ROVER")
+
+    def test_rejects_vin_from_user_outside_allowlist(self) -> None:
+        message = SimpleNamespace(
+            text="SALLSAAG4AA249280",
+            chat_id=127,
+            reply_text=AsyncMock(),
+        )
+        update = SimpleNamespace(
+            message=message,
+            effective_user=SimpleNamespace(id=999999),
+        )
+
+        with patch.object(
+            script,
+            "handle_vin_query",
+            new=AsyncMock(),
+        ) as handle_vin:
+            asyncio.run(script.handle_message(update, None))
+
+        handle_vin.assert_not_awaited()
+        reply = message.reply_text.await_args.args[0]
+        self.assertIn("только допущенным пользователям", reply)
+
+
+class VinAllowlistParsingTests(unittest.TestCase):
+    def test_parses_ids_with_common_separators_and_removes_duplicates(
+        self,
+    ) -> None:
+        self.assertEqual(
+            script.parse_allowed_user_ids("123, 456;123\n789"),
+            frozenset({123, 456, 789}),
+        )
+
+    def test_rejects_invalid_ids(self) -> None:
+        with self.assertRaises(ValueError):
+            script.parse_allowed_user_ids("123,not-an-id")
+        with self.assertRaises(ValueError):
+            script.parse_allowed_user_ids("0")
 
 
 if __name__ == "__main__":
