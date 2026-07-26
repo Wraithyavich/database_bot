@@ -2,12 +2,15 @@ import io
 import json
 import unittest
 from pathlib import Path
+from types import SimpleNamespace
 from unittest.mock import patch
 
 from turbo_database import TurboDatabase
 from vin_online_search import (
     GeminiVinSearcher,
     VinOnlineSearchError,
+    VinOnlineSearcherRouter,
+    YandexVinSearcher,
     attach_catalog_articles,
 )
 from vin_search import VinRecord
@@ -58,6 +61,118 @@ def gemini_response(*, grounded: bool = True) -> bytes:
             ]
         }
     return json.dumps({"candidates": [candidate]}).encode("utf-8")
+
+
+def yandex_response(*, grounded: bool = True) -> bytes:
+    result = {
+        "vehicle": {
+            "make": "Land Rover",
+            "model": "Range Rover Sport",
+            "model_year": "2010",
+            "engine": "3.0 TDV6",
+            "power_kw": "180",
+        },
+        "fitments": [
+            {
+                "position": "Левая",
+                "oem_numbers": ["LR013202"],
+                "turbo_numbers": ["778400-0003"],
+                "evidence": "Номер найден в каталоге.",
+            }
+        ],
+        "summary": "Требуется проверка по установленной турбине.",
+    }
+    document = {
+        "message": {
+            "content": json.dumps(result, ensure_ascii=False),
+            "role": "ROLE_ASSISTANT",
+        },
+        "sources": (
+            [
+                {
+                    "url": "https://example.test/yandex-fitment",
+                    "title": "Yandex indexed parts catalog",
+                    "used": True,
+                }
+            ]
+            if grounded
+            else []
+        ),
+    }
+    return json.dumps([document], ensure_ascii=False).encode("utf-8")
+
+
+class YandexVinSearcherTests(unittest.TestCase):
+    def test_requires_api_key_and_folder_id(self) -> None:
+        for searcher in (
+            YandexVinSearcher("", "folder-id"),
+            YandexVinSearcher("test-key", ""),
+        ):
+            with self.subTest(searcher=searcher):
+                with self.assertRaisesRegex(
+                    VinOnlineSearchError,
+                    "not configured",
+                ):
+                    searcher.search(
+                        VinRecord(vin=KNOWN_VIN, status="pending")
+                    )
+
+    def test_parses_grounded_response_without_exposing_key_in_url(self) -> None:
+        captured = {}
+
+        def fake_urlopen(request, *, timeout):
+            captured["url"] = request.full_url
+            captured["authorization"] = request.get_header("Authorization")
+            captured["body"] = json.loads(request.data)
+            captured["timeout"] = timeout
+            return io.BytesIO(yandex_response())
+
+        with patch(
+            "vin_online_search.urllib.request.urlopen",
+            side_effect=fake_urlopen,
+        ):
+            record = YandexVinSearcher(
+                "secret-test-key",
+                "folder-id",
+                timeout=14,
+            ).search(VinRecord(vin=KNOWN_VIN, status="pending"))
+
+        self.assertNotIn("secret-test-key", captured["url"])
+        self.assertEqual(
+            captured["authorization"],
+            "Api-Key secret-test-key",
+        )
+        self.assertEqual(captured["body"]["folderId"], "folder-id")
+        self.assertEqual(
+            captured["body"]["searchType"],
+            "SEARCH_TYPE_RU",
+        )
+        self.assertEqual(captured["timeout"], 14)
+        self.assertEqual(record.make, "Land Rover")
+        self.assertEqual(record.fitments[0].oem_numbers, ("LR013202",))
+        self.assertEqual(record.fitments[0].turbo_numbers, ("778400-0003",))
+        self.assertEqual(
+            record.sources[0].url,
+            "https://example.test/yandex-fitment",
+        )
+        self.assertEqual(
+            record.online_search_provider,
+            "Yandex Search API + Alice AI",
+        )
+
+    def test_discards_part_numbers_without_sources(self) -> None:
+        with patch(
+            "vin_online_search.urllib.request.urlopen",
+            return_value=io.BytesIO(yandex_response(grounded=False)),
+        ):
+            record = YandexVinSearcher(
+                "test-key",
+                "folder-id",
+            ).search(VinRecord(vin=KNOWN_VIN, status="pending"))
+
+        self.assertEqual(record.fitments, ())
+        self.assertEqual(record.sources, ())
+        self.assertTrue(record.online_search_at)
 
 
 class GeminiVinSearcherTests(unittest.TestCase):
@@ -126,6 +241,56 @@ class GeminiVinSearcherTests(unittest.TestCase):
         )
 
         self.assertEqual(enriched.fitments[0].articles, ("GT17-092-1",))
+
+
+class VinOnlineSearcherRouterTests(unittest.TestCase):
+    def test_prefers_yandex_and_does_not_call_fallback_after_success(self) -> None:
+        expected = VinRecord(vin=KNOWN_VIN, status="pending")
+        yandex = SimpleNamespace(
+            enabled=True,
+            provider_name="Yandex",
+            search=lambda record: expected,
+        )
+
+        def unexpected_search(record):
+            raise AssertionError("fallback must not be called")
+
+        gemini = SimpleNamespace(
+            enabled=True,
+            provider_name="Gemini",
+            search=unexpected_search,
+        )
+        router = VinOnlineSearcherRouter(yandex, gemini)
+
+        self.assertIs(
+            router.search(VinRecord(vin=KNOWN_VIN, status="pending")),
+            expected,
+        )
+        self.assertEqual(router.description, "Yandex → Gemini")
+
+    def test_uses_fallback_after_provider_error(self) -> None:
+        expected = VinRecord(vin=KNOWN_VIN, status="pending")
+
+        def failed_search(record):
+            raise VinOnlineSearchError("temporary error")
+
+        yandex = SimpleNamespace(
+            enabled=True,
+            provider_name="Yandex",
+            search=failed_search,
+        )
+        gemini = SimpleNamespace(
+            enabled=True,
+            provider_name="Gemini",
+            search=lambda record: expected,
+        )
+
+        self.assertIs(
+            VinOnlineSearcherRouter(yandex, gemini).search(
+                VinRecord(vin=KNOWN_VIN, status="pending")
+            ),
+            expected,
+        )
 
 
 if __name__ == "__main__":

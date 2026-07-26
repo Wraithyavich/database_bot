@@ -48,6 +48,8 @@ from vin_online_search import (
     DEFAULT_GEMINI_MODEL,
     GeminiVinSearcher,
     VinOnlineSearchError,
+    VinOnlineSearcherRouter,
+    YandexVinSearcher,
     attach_catalog_articles,
 )
 
@@ -104,9 +106,21 @@ DATABASE = TurboDatabase(resolve_database_path())
 OCR_RECOGNIZER = RapidOcrRecognizer()
 VIN_STORE = VinStore(resolve_vin_database_path())
 VIN_DECODER = NhtsaVinDecoder()
-VIN_ONLINE_SEARCHER = GeminiVinSearcher(
+YANDEX_VIN_SEARCHER = YandexVinSearcher(
+    os.environ.get("YANDEX_API_KEY"),
+    os.environ.get("YANDEX_FOLDER_ID"),
+    search_type=os.environ.get(
+        "YANDEX_SEARCH_TYPE",
+        "SEARCH_TYPE_RU",
+    ),
+)
+GEMINI_VIN_SEARCHER = GeminiVinSearcher(
     os.environ.get("GEMINI_API_KEY"),
     model=os.environ.get("GEMINI_MODEL", DEFAULT_GEMINI_MODEL),
+)
+VIN_ONLINE_SEARCHER = VinOnlineSearcherRouter(
+    YANDEX_VIN_SEARCHER,
+    GEMINI_VIN_SEARCHER,
 )
 VIN_SEARCH_READY = False
 TELEGRAM_MESSAGE_LIMIT = 4000
@@ -654,12 +668,17 @@ def main() -> None:
         )
         if VIN_ONLINE_SEARCHER.enabled:
             logger.info(
-                "Онлайн-поиск VIN включён: %s + Google Search",
-                VIN_ONLINE_SEARCHER.model,
+                "Онлайн-поиск VIN включён: %s",
+                VIN_ONLINE_SEARCHER.description,
             )
         else:
             logger.warning(
-                "Онлайн-поиск VIN выключен: GEMINI_API_KEY не задан"
+                "Онлайн-поиск VIN выключен: настройте Yandex Search API "
+                "или Gemini API"
+            )
+        if YANDEX_VIN_SEARCHER.api_key and not YANDEX_VIN_SEARCHER.folder_id:
+            logger.warning(
+                "Yandex Search API не активирован: YANDEX_FOLDER_ID не задан"
             )
 
     update_queue: asyncio.Queue[object] = asyncio.Queue(maxsize=UPDATE_QUEUE_SIZE)
