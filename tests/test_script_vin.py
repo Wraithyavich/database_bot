@@ -246,7 +246,7 @@ class VinMessageRoutingTests(unittest.TestCase):
         reply = message.reply_text.await_args.args[0]
         self.assertIn("только допущенным пользователям", reply)
 
-    def test_sends_personal_message_only_on_first_vin_of_moscow_day(
+    def test_sends_personal_message_last_on_first_vin_of_moscow_day(
         self,
     ) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
@@ -274,12 +274,12 @@ class VinMessageRoutingTests(unittest.TestCase):
                 patch.object(script, "VIN_SEARCH_READY", True),
                 patch.object(
                     script,
-                    "VIN_DAILY_GREETING_USER_ID",
+                    "DAILY_GREETING_USER_ID",
                     872931508,
                 ),
                 patch.object(
                     script,
-                    "VIN_DAILY_GREETING_TEXT",
+                    "DAILY_GREETING_TEXT",
                     "Daily greeting",
                 ),
                 patch.object(
@@ -296,12 +296,12 @@ class VinMessageRoutingTests(unittest.TestCase):
                 patch.object(script, "VIN_SEARCH_READY", True),
                 patch.object(
                     script,
-                    "VIN_DAILY_GREETING_USER_ID",
+                    "DAILY_GREETING_USER_ID",
                     872931508,
                 ),
                 patch.object(
                     script,
-                    "VIN_DAILY_GREETING_TEXT",
+                    "DAILY_GREETING_TEXT",
                     "Daily greeting",
                 ),
                 patch.object(
@@ -314,13 +314,109 @@ class VinMessageRoutingTests(unittest.TestCase):
 
         self.assertEqual(first_message.reply_text.await_count, 2)
         self.assertEqual(
-            first_message.reply_text.await_args_list[0].args[0],
+            first_message.reply_text.await_args_list[-1].args[0],
             "Daily greeting",
         )
         self.assertEqual(second_message.reply_text.await_count, 1)
         self.assertEqual(next_day_message.reply_text.await_count, 2)
         self.assertEqual(
-            next_day_message.reply_text.await_args_list[0].args[0],
+            next_day_message.reply_text.await_args_list[-1].args[0],
+            "Daily greeting",
+        )
+
+    def test_sends_personal_message_last_after_part_number_search(
+        self,
+    ) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            store = VinStore(Path(temp_dir) / "vin.sqlite")
+            store.initialize(seed_path=PROJECT_DIR / "vin_verified.json")
+            message = SimpleNamespace(
+                text="787556",
+                chat_id=129,
+                reply_text=AsyncMock(),
+            )
+            update = SimpleNamespace(
+                message=message,
+                effective_user=SimpleNamespace(id=872931508),
+            )
+
+            with (
+                patch.object(script, "VIN_STORE", store),
+                patch.object(
+                    script,
+                    "DAILY_GREETING_USER_ID",
+                    872931508,
+                ),
+                patch.object(
+                    script,
+                    "DAILY_GREETING_TEXT",
+                    "Daily greeting",
+                ),
+                patch.object(
+                    script,
+                    "current_moscow_date",
+                    return_value="2026-07-29",
+                ),
+            ):
+                asyncio.run(script.handle_message(update, None))
+
+        self.assertGreaterEqual(message.reply_text.await_count, 2)
+        self.assertNotEqual(
+            message.reply_text.await_args_list[0].args[0],
+            "Daily greeting",
+        )
+        self.assertEqual(
+            message.reply_text.await_args_list[-1].args[0],
+            "Daily greeting",
+        )
+
+    def test_sends_personal_message_last_after_image_error(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            store = VinStore(Path(temp_dir) / "vin.sqlite")
+            store.initialize(seed_path=PROJECT_DIR / "vin_verified.json")
+            message = SimpleNamespace(
+                photo=(
+                    SimpleNamespace(
+                        file_id="oversized-image",
+                        file_size=script.MAX_IMAGE_FILE_BYTES + 1,
+                    ),
+                ),
+                document=None,
+                chat_id=130,
+                reply_text=AsyncMock(),
+            )
+            update = SimpleNamespace(
+                message=message,
+                effective_user=SimpleNamespace(id=872931508),
+            )
+
+            with (
+                patch.object(script, "VIN_STORE", store),
+                patch.object(
+                    script,
+                    "DAILY_GREETING_USER_ID",
+                    872931508,
+                ),
+                patch.object(
+                    script,
+                    "DAILY_GREETING_TEXT",
+                    "Daily greeting",
+                ),
+                patch.object(
+                    script,
+                    "current_moscow_date",
+                    return_value="2026-07-30",
+                ),
+            ):
+                asyncio.run(script.handle_image(update, None))
+
+        self.assertEqual(message.reply_text.await_count, 2)
+        self.assertIn(
+            "Изображение слишком большое",
+            message.reply_text.await_args_list[0].args[0],
+        )
+        self.assertEqual(
+            message.reply_text.await_args_list[-1].args[0],
             "Daily greeting",
         )
 

@@ -143,7 +143,7 @@ def parse_optional_user_id(value: str | None) -> int | None:
         return None
     if len(parsed) != 1:
         raise ValueError(
-            "VIN_DAILY_GREETING_USER_ID must contain exactly one Telegram ID"
+            "DAILY_GREETING_USER_ID must contain exactly one Telegram ID"
         )
     return next(iter(parsed))
 
@@ -175,12 +175,14 @@ VIN_ONLINE_SEARCHER = VinOnlineSearcherRouter(
 VIN_ALLOWED_USER_IDS = parse_allowed_user_ids(
     os.environ.get("VIN_ALLOWED_USER_IDS")
 )
-VIN_DAILY_GREETING_USER_ID = parse_optional_user_id(
-    os.environ.get("VIN_DAILY_GREETING_USER_ID")
+DAILY_GREETING_USER_ID = parse_optional_user_id(
+    os.environ.get("DAILY_GREETING_USER_ID")
+    or os.environ.get("VIN_DAILY_GREETING_USER_ID")
 )
-VIN_DAILY_GREETING_TEXT = os.environ.get(
-    "VIN_DAILY_GREETING_TEXT",
-    "",
+DAILY_GREETING_TEXT = (
+    os.environ.get("DAILY_GREETING_TEXT")
+    or os.environ.get("VIN_DAILY_GREETING_TEXT")
+    or ""
 ).strip()
 VIN_SEARCH_READY = False
 VIN_UNRESOLVED_READY = False
@@ -188,7 +190,7 @@ TELEGRAM_MESSAGE_LIMIT = 4000
 OCR_SEMAPHORE = asyncio.Semaphore(1)
 VIN_ONLINE_SEMAPHORE = asyncio.Semaphore(1)
 MOSCOW_TIMEZONE = timezone(timedelta(hours=3))
-VIN_DAILY_GREETING_EVENT_KEY = "configured_vin_daily_greeting"
+DAILY_GREETING_EVENT_KEY = "configured_vin_daily_greeting"
 USER_IMAGE_RATE_LIMITER = SlidingWindowRateLimiter(
     limit=3,
     window_seconds=60,
@@ -512,43 +514,41 @@ def current_moscow_date() -> str:
     return datetime.now(MOSCOW_TIMEZONE).date().isoformat()
 
 
-async def send_daily_vin_greeting(
-    update: Update,
-    *,
-    user_id: int,
-) -> None:
-    message = update.message
+async def claim_daily_greeting(*, user_id: int) -> bool:
     if (
-        message is None
-        or VIN_DAILY_GREETING_USER_ID is None
-        or not VIN_DAILY_GREETING_TEXT
-        or user_id != VIN_DAILY_GREETING_USER_ID
+        DAILY_GREETING_USER_ID is None
+        or not DAILY_GREETING_TEXT
+        or user_id != DAILY_GREETING_USER_ID
     ):
-        return
+        return False
 
     try:
-        should_send = await asyncio.to_thread(
+        return await asyncio.to_thread(
             VIN_STORE.claim_daily_event,
-            VIN_DAILY_GREETING_EVENT_KEY,
+            DAILY_GREETING_EVENT_KEY,
             current_moscow_date(),
         )
     except (OSError, sqlite3.Error, RuntimeError, ValueError):
         logger.exception(
-            "Не удалось сохранить отметку ежедневного VIN-сообщения"
+            "Не удалось сохранить отметку ежедневного сообщения"
         )
+        return False
+
+
+async def send_daily_greeting(update: Update, *, claimed: bool) -> None:
+    message = update.message
+    if not claimed or message is None:
         return
-
-    if should_send:
-        try:
-            await message.reply_text(VIN_DAILY_GREETING_TEXT)
-        except TelegramError:
-            logger.warning(
-                "Не удалось отправить ежедневное VIN-сообщение",
-                exc_info=True,
-            )
+    try:
+        await message.reply_text(DAILY_GREETING_TEXT)
+    except TelegramError:
+        logger.warning(
+            "Не удалось отправить ежедневное сообщение",
+            exc_info=True,
+        )
 
 
-async def handle_message(
+async def _handle_message_request(
     update: Update, context: ContextTypes.DEFAULT_TYPE
 ) -> None:
     if update.message is None or update.message.text is None:
@@ -569,7 +569,6 @@ async def handle_message(
                     "🔒 Поиск по VIN доступен только допущенным пользователям."
                 )
             return
-        await send_daily_vin_greeting(update, user_id=user.id)
         await handle_vin_query(update, vin)
         return
 
@@ -604,7 +603,22 @@ async def handle_message(
         await update.message.reply_text(chunk)
 
 
-async def handle_image(
+async def handle_message(
+    update: Update, context: ContextTypes.DEFAULT_TYPE
+) -> None:
+    user = update.effective_user
+    claimed = (
+        await claim_daily_greeting(user_id=user.id)
+        if user is not None
+        else False
+    )
+    try:
+        await _handle_message_request(update, context)
+    finally:
+        await send_daily_greeting(update, claimed=claimed)
+
+
+async def _handle_image_request(
     update: Update, context: ContextTypes.DEFAULT_TYPE
 ) -> None:
     message = update.message
@@ -721,6 +735,21 @@ async def handle_image(
         await message.reply_text(chunk)
 
 
+async def handle_image(
+    update: Update, context: ContextTypes.DEFAULT_TYPE
+) -> None:
+    user = update.effective_user
+    claimed = (
+        await claim_daily_greeting(user_id=user.id)
+        if user is not None
+        else False
+    )
+    try:
+        await _handle_image_request(update, context)
+    finally:
+        await send_daily_greeting(update, claimed=claimed)
+
+
 def main() -> None:
     global DATABASE, VIN_SEARCH_READY, VIN_UNRESOLVED_READY
 
@@ -816,16 +845,10 @@ def main() -> None:
             "Белый список VIN пуст: VIN-поиск недоступен пользователям"
         )
 
-    if VIN_DAILY_GREETING_USER_ID is not None and VIN_DAILY_GREETING_TEXT:
-        if VIN_DAILY_GREETING_USER_ID in VIN_ALLOWED_USER_IDS:
-            logger.info(
-                "Персональное ежедневное VIN-сообщение включено"
-            )
-        else:
-            logger.warning(
-                "Ежедневное VIN-сообщение настроено для пользователя "
-                "вне белого списка"
-            )
+    if DAILY_GREETING_USER_ID is not None and DAILY_GREETING_TEXT:
+        logger.info(
+            "Персональное ежедневное сообщение после поиска включено"
+        )
 
     update_queue: asyncio.Queue[object] = asyncio.Queue(maxsize=UPDATE_QUEUE_SIZE)
     app = (
