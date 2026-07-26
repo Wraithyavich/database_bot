@@ -1,3 +1,4 @@
+import base64
 import io
 import json
 import unittest
@@ -63,7 +64,40 @@ def gemini_response(*, grounded: bool = True) -> bytes:
     return json.dumps({"candidates": [candidate]}).encode("utf-8")
 
 
-def yandex_response(*, grounded: bool = True) -> bytes:
+def yandex_web_response(*, grounded: bool = True) -> bytes:
+    if grounded:
+        xml = """
+        <yandexsearch>
+          <response>
+            <results>
+              <grouping>
+                <group>
+                  <doc>
+                    <url>https://example.test/yandex-fitment</url>
+                    <title>Yandex indexed parts catalog</title>
+                    <passages>
+                      <passage>
+                        LAND ROVER Range Rover Sport 2010 3.0 TDV6,
+                        OEM LR013202, Turbo P/N 778400-0003.
+                      </passage>
+                    </passages>
+                  </doc>
+                </group>
+              </grouping>
+            </results>
+          </response>
+        </yandexsearch>
+        """
+    else:
+        xml = "<yandexsearch><response><results /></response></yandexsearch>"
+    return json.dumps(
+        {
+            "rawData": base64.b64encode(xml.encode("utf-8")).decode("ascii")
+        }
+    ).encode("utf-8")
+
+
+def yandex_chat_response(*, hallucinated: bool = False) -> bytes:
     result = {
         "vehicle": {
             "make": "Land Rover",
@@ -76,30 +110,26 @@ def yandex_response(*, grounded: bool = True) -> bytes:
             {
                 "position": "Левая",
                 "oem_numbers": ["LR013202"],
-                "turbo_numbers": ["778400-0003"],
+                "turbo_numbers": [
+                    "999999-9999" if hallucinated else "778400-0003"
+                ],
                 "evidence": "Номер найден в каталоге.",
             }
         ],
+        "source_urls": ["https://example.test/yandex-fitment"],
         "summary": "Требуется проверка по установленной турбине.",
     }
     document = {
-        "message": {
-            "content": json.dumps(result, ensure_ascii=False),
-            "role": "ROLE_ASSISTANT",
-        },
-        "sources": (
-            [
-                {
-                    "url": "https://example.test/yandex-fitment",
-                    "title": "Yandex indexed parts catalog",
-                    "used": True,
+        "choices": [
+            {
+                "message": {
+                    "content": json.dumps(result, ensure_ascii=False),
+                    "role": "assistant",
                 }
-            ]
-            if grounded
-            else []
-        ),
+            }
+        ]
     }
-    return json.dumps([document], ensure_ascii=False).encode("utf-8")
+    return json.dumps(document, ensure_ascii=False).encode("utf-8")
 
 
 class YandexVinSearcherTests(unittest.TestCase):
@@ -118,14 +148,20 @@ class YandexVinSearcherTests(unittest.TestCase):
                     )
 
     def test_parses_grounded_response_without_exposing_key_in_url(self) -> None:
-        captured = {}
+        captured = []
 
         def fake_urlopen(request, *, timeout):
-            captured["url"] = request.full_url
-            captured["authorization"] = request.get_header("Authorization")
-            captured["body"] = json.loads(request.data)
-            captured["timeout"] = timeout
-            return io.BytesIO(yandex_response())
+            captured.append(
+                {
+                    "url": request.full_url,
+                    "authorization": request.get_header("Authorization"),
+                    "body": json.loads(request.data),
+                    "timeout": timeout,
+                }
+            )
+            if request.full_url.endswith("/v2/web/search"):
+                return io.BytesIO(yandex_web_response())
+            return io.BytesIO(yandex_chat_response())
 
         with patch(
             "vin_online_search.urllib.request.urlopen",
@@ -137,17 +173,35 @@ class YandexVinSearcherTests(unittest.TestCase):
                 timeout=14,
             ).search(VinRecord(vin=KNOWN_VIN, status="pending"))
 
-        self.assertNotIn("secret-test-key", captured["url"])
-        self.assertEqual(
-            captured["authorization"],
-            "Api-Key secret-test-key",
+        self.assertEqual(len(captured), 4)
+        self.assertTrue(
+            all("secret-test-key" not in item["url"] for item in captured)
         )
-        self.assertEqual(captured["body"]["folderId"], "folder-id")
+        self.assertTrue(
+            all(
+                item["authorization"] == "Api-Key secret-test-key"
+                for item in captured
+            )
+        )
+        search_requests = [
+            item
+            for item in captured
+            if item["url"].endswith("/v2/web/search")
+        ]
+        self.assertEqual(len(search_requests), 3)
         self.assertEqual(
-            captured["body"]["searchType"],
+            search_requests[0]["body"]["folderId"],
+            "folder-id",
+        )
+        self.assertEqual(
+            search_requests[0]["body"]["query"]["searchType"],
             "SEARCH_TYPE_RU",
         )
-        self.assertEqual(captured["timeout"], 14)
+        self.assertIn(
+            KNOWN_VIN,
+            search_requests[0]["body"]["query"]["queryText"],
+        )
+        self.assertTrue(all(item["timeout"] == 14 for item in captured))
         self.assertEqual(record.make, "Land Rover")
         self.assertEqual(record.fitments[0].oem_numbers, ("LR013202",))
         self.assertEqual(record.fitments[0].turbo_numbers, ("778400-0003",))
@@ -163,7 +217,9 @@ class YandexVinSearcherTests(unittest.TestCase):
     def test_discards_part_numbers_without_sources(self) -> None:
         with patch(
             "vin_online_search.urllib.request.urlopen",
-            return_value=io.BytesIO(yandex_response(grounded=False)),
+            side_effect=lambda request, timeout: io.BytesIO(
+                yandex_web_response(grounded=False),
+            ),
         ):
             record = YandexVinSearcher(
                 "test-key",
@@ -173,6 +229,24 @@ class YandexVinSearcherTests(unittest.TestCase):
         self.assertEqual(record.fitments, ())
         self.assertEqual(record.sources, ())
         self.assertTrue(record.online_search_at)
+
+    def test_discards_numbers_missing_from_search_snippets(self) -> None:
+        def fake_urlopen(request, *, timeout):
+            if request.full_url.endswith("/v2/web/search"):
+                return io.BytesIO(yandex_web_response())
+            return io.BytesIO(yandex_chat_response(hallucinated=True))
+
+        with patch(
+            "vin_online_search.urllib.request.urlopen",
+            side_effect=fake_urlopen,
+        ):
+            record = YandexVinSearcher(
+                "test-key",
+                "folder-id",
+            ).search(VinRecord(vin=KNOWN_VIN, status="pending"))
+
+        self.assertEqual(record.fitments[0].oem_numbers, ("LR013202",))
+        self.assertEqual(record.fitments[0].turbo_numbers, ())
 
 
 class GeminiVinSearcherTests(unittest.TestCase):
