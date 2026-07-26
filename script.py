@@ -46,6 +46,7 @@ from vin_search import (
 )
 from vin_online_search import (
     DEFAULT_GEMINI_MODEL,
+    DEFAULT_YANDEX_MODEL,
     GeminiVinSearcher,
     VinOnlineSearchError,
     VinOnlineSearcherRouter,
@@ -113,6 +114,7 @@ YANDEX_VIN_SEARCHER = YandexVinSearcher(
         "YANDEX_SEARCH_TYPE",
         "SEARCH_TYPE_RU",
     ),
+    model=os.environ.get("YANDEX_MODEL", DEFAULT_YANDEX_MODEL),
 )
 GEMINI_VIN_SEARCHER = GeminiVinSearcher(
     os.environ.get("GEMINI_API_KEY"),
