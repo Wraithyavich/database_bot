@@ -65,17 +65,31 @@ def gemini_response(*, grounded: bool = True) -> bytes:
     return json.dumps({"candidates": [candidate]}).encode("utf-8")
 
 
-def yandex_web_response(*, grounded: bool = True) -> bytes:
+def yandex_web_response(
+    *,
+    grounded: bool = True,
+    identity: bool = True,
+) -> bytes:
     if grounded:
-        xml = """
+        url = (
+            "https://example.test/vin/SALLSAAG4AA249280"
+            if identity
+            else "https://example.test/generic-turbo"
+        )
+        title = (
+            "SALLSAAG4AA249280 parts catalog"
+            if identity
+            else "Generic turbo catalog"
+        )
+        xml = f"""
         <yandexsearch>
           <response>
             <results>
               <grouping>
                 <group>
                   <doc>
-                    <url>https://example.test/yandex-fitment</url>
-                    <title>Yandex indexed parts catalog</title>
+                    <url>{url}</url>
+                    <title>{title}</title>
                     <passages>
                       <passage>
                         LAND ROVER Range Rover Sport 2010 3.0 TDV6,
@@ -117,7 +131,9 @@ def yandex_chat_response(*, hallucinated: bool = False) -> bytes:
                 "evidence": "Номер найден в каталоге.",
             }
         ],
-        "source_urls": ["https://example.test/yandex-fitment"],
+        "source_urls": [
+            "https://example.test/vin/SALLSAAG4AA249280"
+        ],
         "summary": "Требуется проверка по установленной турбине.",
     }
     document = {
@@ -208,7 +224,7 @@ class YandexVinSearcherTests(unittest.TestCase):
         self.assertEqual(record.fitments[0].turbo_numbers, ("778400-0003",))
         self.assertEqual(
             record.sources[0].url,
-            "https://example.test/yandex-fitment",
+            "https://example.test/vin/SALLSAAG4AA249280",
         )
         self.assertEqual(
             record.online_search_provider,
@@ -230,6 +246,29 @@ class YandexVinSearcherTests(unittest.TestCase):
         self.assertEqual(record.fitments, ())
         self.assertEqual(record.sources, ())
         self.assertTrue(record.online_search_at)
+
+    def test_does_not_analyze_results_without_vin_identity_source(self) -> None:
+        requests = []
+
+        def fake_urlopen(request, *, timeout):
+            requests.append(request.full_url)
+            if not request.full_url.endswith("/v2/web/search"):
+                raise AssertionError("YandexGPT must not be called")
+            return io.BytesIO(yandex_web_response(identity=False))
+
+        with patch(
+            "vin_online_search.urllib.request.urlopen",
+            side_effect=fake_urlopen,
+        ):
+            record = YandexVinSearcher(
+                "test-key",
+                "folder-id",
+            ).search(VinRecord(vin=KNOWN_VIN, status="pending"))
+
+        self.assertEqual(len(requests), 3)
+        self.assertEqual(record.fitments, ())
+        self.assertEqual(record.sources, ())
+        self.assertIn("модельный префикс", record.notes)
 
     def test_discards_numbers_missing_from_search_snippets(self) -> None:
         def fake_urlopen(request, *, timeout):
