@@ -148,6 +148,7 @@ class YandexVinSearcher:
         sources = _select_yandex_result_sources(
             grounded_result,
             hits=hits,
+            vin=vin,
         )
         return _build_online_record(
             grounded_result,
@@ -754,6 +755,7 @@ def _select_yandex_result_sources(
     result: dict[str, Any],
     *,
     hits: list[dict[str, str]],
+    vin: str,
 ) -> tuple[VinSource, ...]:
     hit_by_url = {hit["url"]: hit for hit in hits}
     selected_urls: list[str] = []
@@ -776,14 +778,28 @@ def _select_yandex_result_sources(
         ):
             selected_urls.append(hit["url"])
 
-    raw_urls = result.get("source_urls")
-    if isinstance(raw_urls, list):
-        for value in raw_urls:
-            url = _safe_http_url(value)
-            if url in hit_by_url:
-                selected_urls.append(url)
+    if numbers:
+        raw_urls = result.get("source_urls")
+        if isinstance(raw_urls, list):
+            for value in raw_urls:
+                url = _safe_http_url(value)
+                if url in hit_by_url:
+                    selected_urls.append(url)
 
-    selected_urls.extend(hit["url"] for hit in hits)
+    vin = vin.upper()
+    exact_terms = tuple(
+        term for term in (vin, vin[:11] if vin else "") if term
+    )
+    for hit in hits:
+        parsed = urllib.parse.urlsplit(hit["url"])
+        if parsed.netloc.endswith("yandex.ru") and parsed.path.startswith(
+            "/images"
+        ):
+            continue
+        text = _hit_text(hit).upper()
+        if any(term in text for term in exact_terms):
+            selected_urls.append(hit["url"])
+
     sources: list[VinSource] = []
     seen: set[str] = set()
     for url in selected_urls:

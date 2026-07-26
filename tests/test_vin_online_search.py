@@ -12,6 +12,7 @@ from vin_online_search import (
     VinOnlineSearchError,
     VinOnlineSearcherRouter,
     YandexVinSearcher,
+    _select_yandex_result_sources,
     attach_catalog_articles,
 )
 from vin_search import VinRecord
@@ -247,6 +248,37 @@ class YandexVinSearcherTests(unittest.TestCase):
 
         self.assertEqual(record.fitments[0].oem_numbers, ("LR013202",))
         self.assertEqual(record.fitments[0].turbo_numbers, ())
+
+    def test_empty_result_keeps_only_vin_specific_sources(self) -> None:
+        sources = _select_yandex_result_sources(
+            {"fitments": []},
+            vin=KNOWN_VIN,
+            hits=[
+                {
+                    "title": f"Decode {KNOWN_VIN}",
+                    "url": "https://example.test/exact-vin",
+                    "text": "Vehicle details",
+                },
+                {
+                    "title": "Generic turbo catalog",
+                    "url": "https://example.test/generic",
+                    "text": "Unrelated vehicle",
+                },
+                {
+                    "title": f"Images for {KNOWN_VIN[:11]}",
+                    "url": (
+                        "https://yandex.ru/images/search?"
+                        f"text={KNOWN_VIN[:11]}"
+                    ),
+                    "text": "",
+                },
+            ],
+        )
+
+        self.assertEqual(
+            tuple(source.url for source in sources),
+            ("https://example.test/exact-vin",),
+        )
 
 
 class GeminiVinSearcherTests(unittest.TestCase):
