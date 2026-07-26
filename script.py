@@ -3,6 +3,7 @@ import logging
 import os
 import sqlite3
 import tempfile
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 from telegram import Update
@@ -136,6 +137,17 @@ def parse_allowed_user_ids(value: str | None) -> frozenset[int]:
     return frozenset(allowed)
 
 
+def parse_optional_user_id(value: str | None) -> int | None:
+    parsed = parse_allowed_user_ids(value)
+    if not parsed:
+        return None
+    if len(parsed) != 1:
+        raise ValueError(
+            "VIN_DAILY_GREETING_USER_ID must contain exactly one Telegram ID"
+        )
+    return next(iter(parsed))
+
+
 DATABASE = TurboDatabase(resolve_database_path())
 OCR_RECOGNIZER = RapidOcrRecognizer()
 VIN_STORE = VinStore(resolve_vin_database_path())
@@ -163,11 +175,20 @@ VIN_ONLINE_SEARCHER = VinOnlineSearcherRouter(
 VIN_ALLOWED_USER_IDS = parse_allowed_user_ids(
     os.environ.get("VIN_ALLOWED_USER_IDS")
 )
+VIN_DAILY_GREETING_USER_ID = parse_optional_user_id(
+    os.environ.get("VIN_DAILY_GREETING_USER_ID")
+)
+VIN_DAILY_GREETING_TEXT = os.environ.get(
+    "VIN_DAILY_GREETING_TEXT",
+    "",
+).strip()
 VIN_SEARCH_READY = False
 VIN_UNRESOLVED_READY = False
 TELEGRAM_MESSAGE_LIMIT = 4000
 OCR_SEMAPHORE = asyncio.Semaphore(1)
 VIN_ONLINE_SEMAPHORE = asyncio.Semaphore(1)
+MOSCOW_TIMEZONE = timezone(timedelta(hours=3))
+VIN_DAILY_GREETING_EVENT_KEY = "configured_vin_daily_greeting"
 USER_IMAGE_RATE_LIMITER = SlidingWindowRateLimiter(
     limit=3,
     window_seconds=60,
@@ -487,6 +508,46 @@ async def update_unresolved_vin(
         )
 
 
+def current_moscow_date() -> str:
+    return datetime.now(MOSCOW_TIMEZONE).date().isoformat()
+
+
+async def send_daily_vin_greeting(
+    update: Update,
+    *,
+    user_id: int,
+) -> None:
+    message = update.message
+    if (
+        message is None
+        or VIN_DAILY_GREETING_USER_ID is None
+        or not VIN_DAILY_GREETING_TEXT
+        or user_id != VIN_DAILY_GREETING_USER_ID
+    ):
+        return
+
+    try:
+        should_send = await asyncio.to_thread(
+            VIN_STORE.claim_daily_event,
+            VIN_DAILY_GREETING_EVENT_KEY,
+            current_moscow_date(),
+        )
+    except (OSError, sqlite3.Error, RuntimeError, ValueError):
+        logger.exception(
+            "Не удалось сохранить отметку ежедневного VIN-сообщения"
+        )
+        return
+
+    if should_send:
+        try:
+            await message.reply_text(VIN_DAILY_GREETING_TEXT)
+        except TelegramError:
+            logger.warning(
+                "Не удалось отправить ежедневное VIN-сообщение",
+                exc_info=True,
+            )
+
+
 async def handle_message(
     update: Update, context: ContextTypes.DEFAULT_TYPE
 ) -> None:
@@ -508,6 +569,7 @@ async def handle_message(
                     "🔒 Поиск по VIN доступен только допущенным пользователям."
                 )
             return
+        await send_daily_vin_greeting(update, user_id=user.id)
         await handle_vin_query(update, vin)
         return
 
@@ -753,6 +815,17 @@ def main() -> None:
         logger.warning(
             "Белый список VIN пуст: VIN-поиск недоступен пользователям"
         )
+
+    if VIN_DAILY_GREETING_USER_ID is not None and VIN_DAILY_GREETING_TEXT:
+        if VIN_DAILY_GREETING_USER_ID in VIN_ALLOWED_USER_IDS:
+            logger.info(
+                "Персональное ежедневное VIN-сообщение включено"
+            )
+        else:
+            logger.warning(
+                "Ежедневное VIN-сообщение настроено для пользователя "
+                "вне белого списка"
+            )
 
     update_queue: asyncio.Queue[object] = asyncio.Queue(maxsize=UPDATE_QUEUE_SIZE)
     app = (

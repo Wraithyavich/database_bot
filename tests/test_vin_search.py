@@ -86,6 +86,17 @@ class VinStoreTests(unittest.TestCase):
         self.assertEqual(record.status, "verified")
         self.assertEqual(record.make, "Land Rover")
 
+    def test_claims_daily_event_only_once_per_date(self) -> None:
+        self.assertTrue(
+            self.store.claim_daily_event("special-greeting", "2026-07-27")
+        )
+        self.assertFalse(
+            self.store.claim_daily_event("special-greeting", "2026-07-27")
+        )
+        self.assertTrue(
+            self.store.claim_daily_event("special-greeting", "2026-07-28")
+        )
+
     def test_persists_preliminary_online_result(self) -> None:
         unknown_vin = "SALWR2VF0FA000001"
         preliminary = VinRecord(

@@ -8,7 +8,7 @@ import urllib.parse
 import urllib.request
 from contextlib import closing
 from dataclasses import dataclass
-from datetime import UTC, datetime
+from datetime import UTC, date, datetime
 from pathlib import Path
 from typing import Any
 
@@ -328,6 +328,13 @@ class VinStore:
 
                 CREATE INDEX IF NOT EXISTS idx_vin_records_status
                     ON vin_records(status);
+
+                CREATE TABLE IF NOT EXISTS vin_daily_events(
+                    event_key TEXT NOT NULL,
+                    event_date TEXT NOT NULL,
+                    created_at TEXT NOT NULL,
+                    PRIMARY KEY(event_key, event_date)
+                );
                 """
             )
             connection.commit()
@@ -490,6 +497,32 @@ class VinStore:
             pending=counts.get("pending", 0),
             requests=requests,
         )
+
+    def claim_daily_event(
+        self,
+        event_key: str,
+        event_date: date | str,
+    ) -> bool:
+        key = " ".join(event_key.split())
+        if not key:
+            raise ValueError("event_key must not be empty")
+        if isinstance(event_date, date):
+            date_value = event_date.isoformat()
+        else:
+            date_value = date.fromisoformat(event_date).isoformat()
+
+        with closing(self._connect()) as connection:
+            cursor = connection.execute(
+                """
+                INSERT OR IGNORE INTO vin_daily_events(
+                    event_key, event_date, created_at
+                )
+                VALUES (?, ?, ?)
+                """,
+                (key, date_value, utc_now()),
+            )
+            connection.commit()
+        return cursor.rowcount > 0
 
 
 def _clean_api_value(value: Any) -> str:

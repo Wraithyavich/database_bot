@@ -18,7 +18,7 @@ class VinMessageRoutingTests(unittest.TestCase):
         self.allowed_ids_patcher = patch.object(
             script,
             "VIN_ALLOWED_USER_IDS",
-            frozenset({456, 987654, 987655, 987656}),
+            frozenset({456, 987654, 987655, 987656, 872931508}),
         )
         self.allowed_ids_patcher.start()
 
@@ -246,6 +246,84 @@ class VinMessageRoutingTests(unittest.TestCase):
         reply = message.reply_text.await_args.args[0]
         self.assertIn("только допущенным пользователям", reply)
 
+    def test_sends_personal_message_only_on_first_vin_of_moscow_day(
+        self,
+    ) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            store = VinStore(Path(temp_dir) / "vin.sqlite")
+            store.initialize(seed_path=PROJECT_DIR / "vin_verified.json")
+
+            def make_update() -> tuple[SimpleNamespace, SimpleNamespace]:
+                message = SimpleNamespace(
+                    text="SALLSAAG4AA249280",
+                    chat_id=128,
+                    reply_text=AsyncMock(),
+                )
+                update = SimpleNamespace(
+                    message=message,
+                    effective_user=SimpleNamespace(id=872931508),
+                )
+                return update, message
+
+            first_update, first_message = make_update()
+            second_update, second_message = make_update()
+            next_day_update, next_day_message = make_update()
+
+            with (
+                patch.object(script, "VIN_STORE", store),
+                patch.object(script, "VIN_SEARCH_READY", True),
+                patch.object(
+                    script,
+                    "VIN_DAILY_GREETING_USER_ID",
+                    872931508,
+                ),
+                patch.object(
+                    script,
+                    "VIN_DAILY_GREETING_TEXT",
+                    "Daily greeting",
+                ),
+                patch.object(
+                    script,
+                    "current_moscow_date",
+                    return_value="2026-07-27",
+                ),
+            ):
+                asyncio.run(script.handle_message(first_update, None))
+                asyncio.run(script.handle_message(second_update, None))
+
+            with (
+                patch.object(script, "VIN_STORE", store),
+                patch.object(script, "VIN_SEARCH_READY", True),
+                patch.object(
+                    script,
+                    "VIN_DAILY_GREETING_USER_ID",
+                    872931508,
+                ),
+                patch.object(
+                    script,
+                    "VIN_DAILY_GREETING_TEXT",
+                    "Daily greeting",
+                ),
+                patch.object(
+                    script,
+                    "current_moscow_date",
+                    return_value="2026-07-28",
+                ),
+            ):
+                asyncio.run(script.handle_message(next_day_update, None))
+
+        self.assertEqual(first_message.reply_text.await_count, 2)
+        self.assertEqual(
+            first_message.reply_text.await_args_list[0].args[0],
+            "Daily greeting",
+        )
+        self.assertEqual(second_message.reply_text.await_count, 1)
+        self.assertEqual(next_day_message.reply_text.await_count, 2)
+        self.assertEqual(
+            next_day_message.reply_text.await_args_list[0].args[0],
+            "Daily greeting",
+        )
+
 
 class VinAllowlistParsingTests(unittest.TestCase):
     def test_parses_ids_with_common_separators_and_removes_duplicates(
@@ -261,6 +339,12 @@ class VinAllowlistParsingTests(unittest.TestCase):
             script.parse_allowed_user_ids("123,not-an-id")
         with self.assertRaises(ValueError):
             script.parse_allowed_user_ids("0")
+
+    def test_parses_optional_single_user_id(self) -> None:
+        self.assertEqual(script.parse_optional_user_id("872931508"), 872931508)
+        self.assertIsNone(script.parse_optional_user_id(""))
+        with self.assertRaises(ValueError):
+            script.parse_optional_user_id("123,456")
 
 
 if __name__ == "__main__":
