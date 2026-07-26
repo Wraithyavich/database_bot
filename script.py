@@ -44,6 +44,7 @@ from vin_search import (
     format_pending_vin,
     format_verified_vin,
 )
+from vin_unresolved import UnresolvedVinStore
 from vin_online_search import (
     DEFAULT_GEMINI_MODEL,
     DEFAULT_YANDEX_MODEL,
@@ -103,9 +104,24 @@ def resolve_vin_database_path() -> Path:
     return path.resolve()
 
 
+def resolve_unresolved_vin_database_path() -> Path:
+    configured_path = os.environ.get("VIN_UNRESOLVED_DATABASE_PATH")
+    path = (
+        Path(configured_path)
+        if configured_path
+        else BASE_DIR / "vin_unresolved.sqlite"
+    )
+    if not path.is_absolute():
+        path = BASE_DIR / path
+    return path.resolve()
+
+
 DATABASE = TurboDatabase(resolve_database_path())
 OCR_RECOGNIZER = RapidOcrRecognizer()
 VIN_STORE = VinStore(resolve_vin_database_path())
+VIN_UNRESOLVED_STORE = UnresolvedVinStore(
+    resolve_unresolved_vin_database_path()
+)
 VIN_DECODER = NhtsaVinDecoder()
 YANDEX_VIN_SEARCHER = YandexVinSearcher(
     os.environ.get("YANDEX_API_KEY"),
@@ -125,6 +141,7 @@ VIN_ONLINE_SEARCHER = VinOnlineSearcherRouter(
     GEMINI_VIN_SEARCHER,
 )
 VIN_SEARCH_READY = False
+VIN_UNRESOLVED_READY = False
 TELEGRAM_MESSAGE_LIMIT = 4000
 OCR_SEMAPHORE = asyncio.Semaphore(1)
 VIN_ONLINE_SEMAPHORE = asyncio.Semaphore(1)
@@ -327,10 +344,12 @@ async def handle_vin_query(
     try:
         record = await asyncio.to_thread(VIN_STORE.lookup, vin)
         if record is not None and record.status == "verified":
+            await update_unresolved_vin(record)
             lines = format_verified_vin(record)
         else:
             decoder_failed = False
             online_search_note = ""
+            failure_code = ""
             if record is None:
                 try:
                     record = await asyncio.to_thread(VIN_DECODER.decode, vin)
@@ -341,10 +360,12 @@ async def handle_vin_query(
                         exc_info=True,
                     )
                     decoder_failed = True
+                    failure_code = "vin_decoder_error"
                     record = VinRecord(vin=vin, status="pending")
 
             if not record.online_search_at:
                 if not VIN_ONLINE_SEARCHER.enabled:
+                    failure_code = "online_search_not_configured"
                     online_search_note = (
                         "Онлайн-поиск пока не настроен администратором."
                     )
@@ -373,6 +394,7 @@ async def handle_vin_query(
                         limit for limit in limits if not limit.allowed
                     )
                     if denied:
+                        failure_code = "online_search_rate_limited"
                         retry_after = max(
                             limit.retry_after for limit in denied
                         )
@@ -389,6 +411,7 @@ async def handle_vin_query(
                             )
                             acquired = True
                         except TimeoutError:
+                            failure_code = "online_search_busy"
                             online_search_note = (
                                 "Онлайн-поиск занят другим VIN. "
                                 "Повторите запрос немного позже."
@@ -406,6 +429,7 @@ async def handle_vin_query(
                                     DATABASE,
                                 )
                             except VinOnlineSearchError:
+                                failure_code = "online_search_error"
                                 logger.warning(
                                     "Онлайн-поиск не выполнен для VIN …%s",
                                     vin[-6:],
@@ -423,10 +447,29 @@ async def handle_vin_query(
                 decoded=record,
             )
             if record.status == "verified":
+                await update_unresolved_vin(record)
                 lines = format_verified_vin(record)
             elif record.online_search_at:
+                if record.fitments:
+                    await update_unresolved_vin(record)
+                else:
+                    failure_code = "no_supported_turbo_numbers"
+                    online_search_note = (
+                        "В открытых источниках не найдено достаточно "
+                        "обоснованных номеров турбин."
+                    )
+                    await update_unresolved_vin(
+                        record,
+                        failure_code=failure_code,
+                        failure_detail=online_search_note,
+                    )
                 lines = format_online_vin(record)
             else:
+                await update_unresolved_vin(
+                    record,
+                    failure_code=failure_code or "vin_not_processed",
+                    failure_detail=online_search_note,
+                )
                 lines = format_pending_vin(
                     record,
                     decoder_failed=decoder_failed,
@@ -435,6 +478,11 @@ async def handle_vin_query(
                     lines.extend(["", online_search_note])
     except (OSError, sqlite3.Error, RuntimeError, ValueError):
         logger.exception("Ошибка VIN-поиска для VIN …%s", vin[-6:])
+        await update_unresolved_vin(
+            VinRecord(vin=vin, status="pending"),
+            failure_code="vin_pipeline_error",
+            failure_detail="Внутренняя ошибка обработки VIN.",
+        )
         await message.reply_text(
             "❌ VIN-база временно недоступна. Попробуйте позднее."
         )
@@ -442,6 +490,33 @@ async def handle_vin_query(
 
     for chunk in split_long_message(lines):
         await message.reply_text(chunk)
+
+
+async def update_unresolved_vin(
+    record: VinRecord,
+    *,
+    failure_code: str = "",
+    failure_detail: str = "",
+) -> None:
+    if not VIN_UNRESOLVED_READY:
+        return
+
+    try:
+        if failure_code:
+            await asyncio.to_thread(
+                VIN_UNRESOLVED_STORE.record_failure,
+                record.vin,
+                failure_code=failure_code,
+                failure_detail=failure_detail,
+                record=record,
+            )
+        else:
+            await asyncio.to_thread(VIN_UNRESOLVED_STORE.remove, record.vin)
+    except (OSError, sqlite3.Error, RuntimeError, ValueError):
+        logger.exception(
+            "Не удалось обновить отдельную базу неразобранных VIN …%s",
+            record.vin[-6:],
+        )
 
 
 async def handle_message(
@@ -614,7 +689,7 @@ async def handle_image(
 
 
 def main() -> None:
-    global DATABASE, VIN_SEARCH_READY
+    global DATABASE, VIN_SEARCH_READY, VIN_UNRESOLVED_READY
 
     if not API_TOKEN:
         raise ValueError("❌ Переменная окружения API_TOKEN не задана!")
@@ -682,6 +757,21 @@ def main() -> None:
             logger.warning(
                 "Yandex Search API не активирован: YANDEX_FOLDER_ID не задан"
             )
+
+    try:
+        unresolved_stats = VIN_UNRESOLVED_STORE.initialize()
+    except (OSError, sqlite3.Error, RuntimeError, ValueError):
+        logger.exception(
+            "Отдельная база неразобранных VIN не запустилась. "
+            "Остальные виды поиска продолжат работать."
+        )
+    else:
+        VIN_UNRESOLVED_READY = True
+        logger.info(
+            "База неразобранных VIN загружена: %s VIN, %s запросов",
+            unresolved_stats.unique_vins,
+            unresolved_stats.requests,
+        )
 
     update_queue: asyncio.Queue[object] = asyncio.Queue(maxsize=UPDATE_QUEUE_SIZE)
     app = (

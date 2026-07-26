@@ -7,6 +7,7 @@ from unittest.mock import AsyncMock, patch
 
 import script
 from vin_search import VinFitment, VinRecord, VinSource, VinStore
+from vin_unresolved import UnresolvedVinStore
 
 
 PROJECT_DIR = Path(__file__).resolve().parents[1]
@@ -145,6 +146,58 @@ class VinMessageRoutingTests(unittest.TestCase):
         reply = message.reply_text.await_args.args[0]
         self.assertIn("сохранён в очереди", reply)
         self.assertIn("Онлайн-поиск пока не настроен", reply)
+
+    def test_unprocessed_vin_is_written_to_separate_database(self) -> None:
+        unknown_vin = "SALWR2VF0FA000003"
+        with tempfile.TemporaryDirectory() as temp_dir:
+            store = VinStore(Path(temp_dir) / "vin.sqlite")
+            store.initialize(seed_path=PROJECT_DIR / "vin_verified.json")
+            unresolved_store = UnresolvedVinStore(
+                Path(temp_dir) / "vin_unresolved.sqlite"
+            )
+            unresolved_store.initialize()
+            message = SimpleNamespace(
+                text=unknown_vin,
+                chat_id=126,
+                reply_text=AsyncMock(),
+            )
+            update = SimpleNamespace(
+                message=message,
+                effective_user=SimpleNamespace(id=987656),
+            )
+            searcher = SimpleNamespace(enabled=False)
+
+            with (
+                patch.object(script, "VIN_STORE", store),
+                patch.object(script, "VIN_SEARCH_READY", True),
+                patch.object(
+                    script,
+                    "VIN_UNRESOLVED_STORE",
+                    unresolved_store,
+                ),
+                patch.object(script, "VIN_UNRESOLVED_READY", True),
+                patch.object(script, "VIN_ONLINE_SEARCHER", searcher),
+                patch.object(
+                    script.VIN_DECODER,
+                    "decode",
+                    return_value=VinRecord(
+                        vin=unknown_vin,
+                        status="pending",
+                        make="LAND ROVER",
+                    ),
+                ),
+            ):
+                asyncio.run(script.handle_message(update, None))
+
+            unresolved = unresolved_store.list()
+
+        self.assertEqual(len(unresolved), 1)
+        self.assertEqual(unresolved[0].vin, unknown_vin)
+        self.assertEqual(
+            unresolved[0].failure_code,
+            "online_search_not_configured",
+        )
+        self.assertEqual(unresolved[0].make, "LAND ROVER")
 
 
 if __name__ == "__main__":

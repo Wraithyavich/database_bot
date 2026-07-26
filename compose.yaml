@@ -12,6 +12,7 @@ services:
     environment:
       DATABASE_PATH: /app/turbo_search.sqlite
       VIN_DATABASE_PATH: /data/vin_cache.sqlite
+      VIN_UNRESOLVED_DATABASE_PATH: /data/vin_unresolved.sqlite
     volumes:
       - vin-data:/data
     init: true

@@ -10,6 +10,8 @@ bot_token.py
 .deploy-*
 data/
 vin_cache.sqlite
+vin_unresolved.sqlite
+vin_unresolved_export.csv
 
 *.sqlite-shm
 *.sqlite-wal

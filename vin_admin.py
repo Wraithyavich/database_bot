@@ -1,10 +1,12 @@
 from __future__ import annotations
 
 import argparse
+import csv
 import os
 from pathlib import Path
 
 from vin_search import VinStore
+from vin_unresolved import UnresolvedVin, UnresolvedVinStore
 
 
 BASE_DIR = Path(__file__).resolve().parent
@@ -14,7 +16,13 @@ def main() -> None:
     parser = argparse.ArgumentParser(description="Inspect the VIN verification queue")
     parser.add_argument(
         "command",
-        choices=("pending", "stats"),
+        choices=(
+            "pending",
+            "stats",
+            "unresolved",
+            "unresolved-stats",
+            "export-unresolved",
+        ),
         help="Queue operation to run",
     )
     parser.add_argument(
@@ -22,8 +30,72 @@ def main() -> None:
         default=os.environ.get("VIN_DATABASE_PATH", BASE_DIR / "vin_cache.sqlite"),
         help="Path to the writable VIN SQLite database",
     )
+    parser.add_argument(
+        "--unresolved-database",
+        default=os.environ.get(
+            "VIN_UNRESOLVED_DATABASE_PATH",
+            BASE_DIR / "vin_unresolved.sqlite",
+        ),
+        help="Path to the separate unresolved VIN SQLite database",
+    )
     parser.add_argument("--limit", type=int, default=100)
+    parser.add_argument(
+        "--output",
+        help="CSV path for export-unresolved (defaults next to its database)",
+    )
     args = parser.parse_args()
+
+    if (
+        args.command.startswith("unresolved")
+        or args.command == "export-unresolved"
+    ):
+        unresolved_store = UnresolvedVinStore(args.unresolved_database)
+        unresolved_store.initialize()
+        unresolved = unresolved_store.list(limit=args.limit)
+
+        if args.command == "unresolved-stats":
+            stats = unresolved_store.stats()
+            print(
+                f"unique_vins={stats.unique_vins} "
+                f"requests={stats.requests}"
+            )
+            return
+
+        if args.command == "export-unresolved":
+            output = (
+                Path(args.output)
+                if args.output
+                else unresolved_store.path.with_name(
+                    "vin_unresolved_export.csv"
+                )
+            )
+            output.parent.mkdir(parents=True, exist_ok=True)
+            _export_unresolved_csv(output, unresolved)
+            print(f"exported={len(unresolved)} path={output}")
+            return
+
+        for item in unresolved:
+            details = " | ".join(
+                value
+                for value in (
+                    item.vin,
+                    f"requests={item.request_count}",
+                    f"reason={item.failure_code}",
+                    item.make,
+                    item.model,
+                    item.model_year,
+                    item.engine,
+                    (
+                        f"provider={item.online_search_provider}"
+                        if item.online_search_provider
+                        else ""
+                    ),
+                    f"last={item.last_requested_at}",
+                )
+                if value
+            )
+            print(details)
+        return
 
     store = VinStore(args.database)
     store.initialize(seed_path=BASE_DIR / "vin_verified.json")
@@ -68,6 +140,34 @@ def main() -> None:
             if value
         )
         print(details)
+
+
+def _export_unresolved_csv(
+    output: Path,
+    unresolved: tuple[UnresolvedVin, ...],
+) -> None:
+    fieldnames = (
+        "vin",
+        "request_count",
+        "failure_code",
+        "failure_detail",
+        "make",
+        "model",
+        "model_year",
+        "engine",
+        "power_kw",
+        "online_search_provider",
+        "online_search_at",
+        "first_requested_at",
+        "last_requested_at",
+    )
+    with output.open("w", encoding="utf-8-sig", newline="") as stream:
+        writer = csv.DictWriter(stream, fieldnames=fieldnames)
+        writer.writeheader()
+        for item in unresolved:
+            writer.writerow(
+                {field: getattr(item, field) for field in fieldnames}
+            )
 
 
 if __name__ == "__main__":

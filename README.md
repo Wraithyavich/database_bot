@@ -100,16 +100,27 @@ VIN и очередь продолжают работать, но интерне
 пользователя за 10 минут, 5 запросов суммарно за 10 минут и 20 запросов в сутки.
 Повторный VIN берётся из SQLite-кэша без нового платного обращения.
 
-Очередь и статистику можно посмотреть внутри контейнера:
+Результаты и очередь ручной проверки хранятся в `/data/vin_cache.sqlite`.
+Запросы, для которых не удалось получить ни одного обоснованного номера
+турбины, дополнительно записываются в отдельную базу
+`/data/vin_unresolved.sqlite`. Она не содержит Telegram ID, chat ID и другие
+данные пользователя. Повторные запросы одного VIN увеличивают его счётчик.
+Если позднее VIN успешно обрабатывается, он удаляется из этой базы.
+
+Очереди и статистику можно посмотреть внутри контейнера:
 
 ```powershell
 docker exec database-bot python vin_admin.py stats
 docker exec database-bot python vin_admin.py pending
+docker exec database-bot python vin_admin.py unresolved-stats
+docker exec database-bot python vin_admin.py unresolved --limit 100
+docker exec database-bot python vin_admin.py export-unresolved --limit 1000
+docker cp database-bot:/data/vin_unresolved_export.csv .
 ```
 
 Новые подтверждённые соответствия добавляются в `vin_verified.json`, проходят
 проверку и доставляются обычным обновлением контейнера. Docker volume `vin-data`
-сохраняет очередь VIN при пересборке и замене контейнера.
+сохраняет обе VIN-базы при пересборке и замене контейнера.
 
 ## Запуск
 
