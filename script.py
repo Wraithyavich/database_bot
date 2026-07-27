@@ -47,9 +47,7 @@ from vin_search import (
 )
 from vin_unresolved import UnresolvedVinStore
 from vin_online_search import (
-    DEFAULT_GEMINI_MODEL,
     DEFAULT_YANDEX_MODEL,
-    GeminiVinSearcher,
     VinOnlineSearchError,
     VinOnlineSearcherRouter,
     YandexVinSearcher,
@@ -164,13 +162,8 @@ YANDEX_VIN_SEARCHER = YandexVinSearcher(
     ),
     model=os.environ.get("YANDEX_MODEL", DEFAULT_YANDEX_MODEL),
 )
-GEMINI_VIN_SEARCHER = GeminiVinSearcher(
-    os.environ.get("GEMINI_API_KEY"),
-    model=os.environ.get("GEMINI_MODEL", DEFAULT_GEMINI_MODEL),
-)
 VIN_ONLINE_SEARCHER = VinOnlineSearcherRouter(
     YANDEX_VIN_SEARCHER,
-    GEMINI_VIN_SEARCHER,
 )
 VIN_ALLOWED_USER_IDS = parse_allowed_user_ids(
     os.environ.get("VIN_ALLOWED_USER_IDS")
@@ -812,8 +805,7 @@ def main() -> None:
             )
         else:
             logger.warning(
-                "Онлайн-поиск VIN выключен: настройте Yandex Search API "
-                "или Gemini API"
+                "Онлайн-поиск VIN выключен: настройте Yandex Search API"
             )
         if YANDEX_VIN_SEARCHER.api_key and not YANDEX_VIN_SEARCHER.folder_id:
             logger.warning(

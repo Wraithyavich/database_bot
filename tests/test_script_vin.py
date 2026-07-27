@@ -443,5 +443,14 @@ class VinAllowlistParsingTests(unittest.TestCase):
             script.parse_optional_user_id("123,456")
 
 
+class ProductionVinProviderTests(unittest.TestCase):
+    def test_uses_only_yandex_emex_searcher(self) -> None:
+        self.assertEqual(
+            script.VIN_ONLINE_SEARCHER.searchers,
+            (script.YANDEX_VIN_SEARCHER,),
+        )
+        self.assertIn("Emex", script.YANDEX_VIN_SEARCHER.provider_name)
+
+
 if __name__ == "__main__":
     unittest.main()

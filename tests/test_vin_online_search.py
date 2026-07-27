@@ -12,6 +12,7 @@ from vin_online_search import (
     VinOnlineSearchError,
     VinOnlineSearcherRouter,
     YandexVinSearcher,
+    _filter_emex_hits,
     _select_yandex_result_sources,
     attach_catalog_articles,
 )
@@ -72,9 +73,9 @@ def yandex_web_response(
 ) -> bytes:
     if grounded:
         url = (
-            "https://example.test/vin/SALLSAAG4AA249280"
+            "https://emex.ru/vin/SALLSAAG4AA249280"
             if identity
-            else "https://example.test/generic-turbo"
+            else "https://emex.ru/generic-turbo"
         )
         title = (
             "SALLSAAG4AA249280 parts catalog"
@@ -132,7 +133,7 @@ def yandex_chat_response(*, hallucinated: bool = False) -> bytes:
             }
         ],
         "source_urls": [
-            "https://example.test/vin/SALLSAAG4AA249280"
+            "https://emex.ru/vin/SALLSAAG4AA249280"
         ],
         "summary": "Требуется проверка по установленной турбине.",
     }
@@ -218,17 +219,31 @@ class YandexVinSearcherTests(unittest.TestCase):
             KNOWN_VIN,
             search_requests[0]["body"]["query"]["queryText"],
         )
+        self.assertTrue(
+            all(
+                "site:emex.ru"
+                in item["body"]["query"]["queryText"]
+                for item in search_requests
+            )
+        )
+        self.assertTrue(
+            all(
+                "exist.ru"
+                not in item["body"]["query"]["queryText"].lower()
+                for item in search_requests
+            )
+        )
         self.assertTrue(all(item["timeout"] == 14 for item in captured))
         self.assertEqual(record.make, "Land Rover")
         self.assertEqual(record.fitments[0].oem_numbers, ("LR013202",))
         self.assertEqual(record.fitments[0].turbo_numbers, ("778400-0003",))
         self.assertEqual(
             record.sources[0].url,
-            "https://example.test/vin/SALLSAAG4AA249280",
+            "https://emex.ru/vin/SALLSAAG4AA249280",
         )
         self.assertEqual(
             record.online_search_provider,
-            "Yandex Search API + Alice AI",
+            "Yandex Search API + Alice AI (Emex)",
         )
 
     def test_discards_part_numbers_without_sources(self) -> None:
@@ -295,12 +310,12 @@ class YandexVinSearcherTests(unittest.TestCase):
             hits=[
                 {
                     "title": f"Decode {KNOWN_VIN}",
-                    "url": "https://example.test/exact-vin",
+                    "url": "https://emex.ru/exact-vin",
                     "text": "Vehicle details",
                 },
                 {
                     "title": "Generic turbo catalog",
-                    "url": "https://example.test/generic",
+                    "url": "https://emex.ru/generic",
                     "text": "Unrelated vehicle",
                 },
                 {
@@ -316,7 +331,35 @@ class YandexVinSearcherTests(unittest.TestCase):
 
         self.assertEqual(
             tuple(source.url for source in sources),
-            ("https://example.test/exact-vin",),
+            ("https://emex.ru/exact-vin",),
+        )
+
+    def test_accepts_only_emex_domains(self) -> None:
+        hits = [
+            {"url": "https://emex.ru/search", "title": "", "text": ""},
+            {
+                "url": "https://kazan.emex.ru/search",
+                "title": "",
+                "text": "",
+            },
+            {
+                "url": "https://exist.ru/search",
+                "title": "",
+                "text": "",
+            },
+            {
+                "url": "https://notemex.ru/search",
+                "title": "",
+                "text": "",
+            },
+        ]
+
+        self.assertEqual(
+            [hit["url"] for hit in _filter_emex_hits(hits)],
+            [
+                "https://emex.ru/search",
+                "https://kazan.emex.ru/search",
+            ],
         )
 
 

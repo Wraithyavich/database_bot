@@ -35,6 +35,8 @@ MAX_YANDEX_SUPPLEMENTAL_QUERIES = 2
 MAX_GROUNDING_SOURCES = 5
 MAX_FITMENTS = 6
 CARTRIDGE_CATEGORY = "Картриджи"
+EMEX_HOST = "emex.ru"
+EMEX_SITE_FILTER = f"site:{EMEX_HOST}"
 MODEL_PATTERN = re.compile(r"^[A-Za-z0-9._-]{1,80}$")
 YANDEX_MODEL_PATTERN = re.compile(r"^[A-Za-z0-9._/-]{1,80}$")
 FOLDER_ID_PATTERN = re.compile(r"^[A-Za-z0-9_-]{4,64}$")
@@ -83,7 +85,7 @@ class YandexVinSearcher:
 
     @property
     def provider_name(self) -> str:
-        return "Yandex Search API + Alice AI"
+        return "Yandex Search API + Alice AI (Emex)"
 
     def search(self, base_record: VinRecord) -> VinRecord:
         vin = extract_vin(base_record.vin)
@@ -99,7 +101,7 @@ class YandexVinSearcher:
             vin,
             base_record=base_record,
         ):
-            query_hits = self._web_search(query)
+            query_hits = _filter_emex_hits(self._web_search(query))
             for hit in query_hits:
                 hit["query"] = query
             hits.extend(query_hits)
@@ -125,7 +127,7 @@ class YandexVinSearcher:
             vin=vin,
             base_record=base_record,
         ):
-            query_hits = self._web_search(query)
+            query_hits = _filter_emex_hits(self._web_search(query))
             for hit in query_hits:
                 hit["query"] = query
             hits.extend(query_hits)
@@ -468,9 +470,9 @@ def _build_yandex_search_queries(
     )
     prefix = vin[:11]
     queries = (
-        f'"{vin}"',
-        f'"{prefix}" turbocharger OEM {vehicle}'.strip(),
-        f'"{prefix}" турбина номер {vehicle}'.strip(),
+        f'"{vin}" {EMEX_SITE_FILTER}',
+        f'"{prefix}" turbocharger OEM {vehicle} {EMEX_SITE_FILTER}'.strip(),
+        f'"{prefix}" турбина номер {vehicle} {EMEX_SITE_FILTER}'.strip(),
     )
     return tuple(dict.fromkeys(queries))
 
@@ -495,8 +497,14 @@ def _build_yandex_supplemental_queries(
     )
     engine_code = engine_codes[0]
     return (
-        f'"{engine_code}" turbocharger OEM {vehicle}'.strip(),
-        f'"{engine_code}" турбина OEM {vehicle}'.strip(),
+        (
+            f'"{engine_code}" turbocharger OEM '
+            f"{vehicle} {EMEX_SITE_FILTER}"
+        ).strip(),
+        (
+            f'"{engine_code}" турбина OEM '
+            f"{vehicle} {EMEX_SITE_FILTER}"
+        ).strip(),
     )[:MAX_YANDEX_SUPPLEMENTAL_QUERIES]
 
 
@@ -540,7 +548,7 @@ def _build_yandex_analysis_prompt(
         "power_kw": base_record.power_kw,
     }
     return f"""
-Проанализируй результаты Yandex Search для VIN {vin}.
+Проанализируй результаты Yandex Search по каталогу Emex для VIN {vin}.
 
 Базовые данные декодера, которые могут быть неполными:
 {json.dumps(known_vehicle, ensure_ascii=False)}
@@ -550,6 +558,7 @@ def _build_yandex_analysis_prompt(
 {json.dumps(likely_engine_codes[:3], ensure_ascii=False)}
 
 Правила:
+- Используй только результаты с домена emex.ru и его поддоменов.
 - Учитывай только этот VIN или автомобиль/двигатель, явно связанный с ним.
 - Первые 11 символов {vin[:11]} используются как модельный префикс. Для
   предварительного результата разрешено сопоставлять другой VIN с тем же
@@ -736,7 +745,9 @@ def _filter_result_to_grounded_numbers(
         filtered["fitments"] = []
         return filtered
 
-    evidence = tuple(_hit_text(hit) for hit in hits)
+    evidence = tuple(
+        _hit_text(hit) for hit in _filter_emex_hits(hits)
+    )
     fitments: list[dict[str, Any]] = []
     for raw in raw_fitments[:MAX_FITMENTS]:
         if not isinstance(raw, dict):
@@ -774,6 +785,7 @@ def _select_yandex_result_sources(
     hits: list[dict[str, str]],
     vin: str,
 ) -> tuple[VinSource, ...]:
+    hits = _filter_emex_hits(hits)
     hit_by_url = {hit["url"]: hit for hit in hits}
     selected_urls: list[str] = []
 
@@ -834,18 +846,32 @@ def _vin_identity_hits(
     vin = vin.upper()
     terms = (vin, vin[:11])
     selected: list[dict[str, str]] = []
-    for hit in hits:
+    for hit in _filter_emex_hits(hits):
         parsed = urllib.parse.urlsplit(hit.get("url", ""))
         if parsed.netloc.endswith("yandex.ru") and parsed.path.startswith(
             "/images"
         ):
             continue
-        identity_text = " ".join(
-            (hit.get("title", ""), hit.get("url", ""))
-        ).upper()
+        identity_text = _hit_text(hit).upper()
         if any(term in identity_text for term in terms):
             selected.append(hit)
     return tuple(selected)
+
+
+def _filter_emex_hits(
+    hits: list[dict[str, str]],
+) -> list[dict[str, str]]:
+    return [
+        hit
+        for hit in hits
+        if _is_emex_url(hit.get("url", ""))
+    ]
+
+
+def _is_emex_url(value: str) -> bool:
+    parsed = urllib.parse.urlsplit(value)
+    host = (parsed.hostname or "").lower().rstrip(".")
+    return host == EMEX_HOST or host.endswith(f".{EMEX_HOST}")
 
 
 def _number_is_grounded(value: Any, text: str) -> bool:
