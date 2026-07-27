@@ -25,6 +25,7 @@ WORKDIR /workspace
 COPY --chown=observer:observer \
     vin_agent_worker.py \
     vin_agent_schema.json \
+    vin_emex_catalog.py \
     vin_online_search.py \
     vin_search.py \
     vin_unresolved.py \

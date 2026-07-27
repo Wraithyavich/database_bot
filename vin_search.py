@@ -110,7 +110,9 @@ def format_verified_vin(record: VinRecord) -> list[str]:
         if fitment.turbo_numbers:
             lines.append(f"  Turbo P/N: {', '.join(fitment.turbo_numbers)}")
         if fitment.articles:
-            lines.append(f"  Наши картриджи: {', '.join(fitment.articles)}")
+            lines.append(
+                f"  Артикулы в нашей базе: {', '.join(fitment.articles)}"
+            )
 
     if record.sources:
         lines.extend(["", "Источники:"])
@@ -196,7 +198,7 @@ def format_online_vin(record: VinRecord) -> list[str]:
                 lines.append(f"  Turbo P/N: {', '.join(fitment.turbo_numbers)}")
             if fitment.articles:
                 lines.append(
-                    "  Возможные картриджи из нашей базы: "
+                    "  Точные совпадения в нашей базе: "
                     f"{', '.join(fitment.articles)}"
                 )
             if fitment.evidence:

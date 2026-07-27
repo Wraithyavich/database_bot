@@ -4,13 +4,17 @@ import subprocess
 import tempfile
 import unittest
 from pathlib import Path
+from types import SimpleNamespace
 from unittest.mock import patch
 
-from vin_agent_worker import CodexRunner, parse_agent_result
-from vin_search import VinRecord
+from turbo_database import TurboDatabase
+from vin_agent_worker import CodexRunner, VinAgentService, parse_agent_result
+from vin_search import VinFitment, VinRecord, VinSource, VinStore
+from vin_unresolved import UnresolvedVinStore
 
 
 VIN = "SALWR2VF0FA000007"
+DATABASE_PATH = Path(__file__).resolve().parents[1] / "turbo_search.sqlite"
 
 
 def result_document(*, status: str = "found") -> dict:
@@ -135,6 +139,97 @@ class CodexRunnerTests(unittest.TestCase):
         self.assertNotIn("API_TOKEN", captured_environment)
         self.assertNotIn("YANDEX_API_KEY", captured_environment)
         self.assertIn("CODEX_HOME", captured_environment)
+
+
+class VinAgentServiceTests(unittest.TestCase):
+    def test_emex_result_skips_codex_and_maps_local_articles(self) -> None:
+        class UnexpectedRunner:
+            def search(self, record):
+                raise AssertionError("Codex must not run after Emex success")
+
+        class CapturingNotifier:
+            def __init__(self):
+                self.messages = []
+
+            def send(self, text):
+                self.messages.append(text)
+                return True
+
+        emex_record = VinRecord(
+            vin=VIN,
+            status="pending",
+            make="Audi",
+            model="A4/Avant",
+            fitments=(
+                VinFitment(
+                    position="Турбокомпрессор, группа 145-020",
+                    oem_numbers=("06L145874E", "06L145722TX"),
+                    turbo_numbers=(),
+                    articles=(),
+                    evidence="VIN-фильтрованный каталог Emex DWC.",
+                ),
+            ),
+            sources=(
+                VinSource(
+                    label="Emex DWC",
+                    url=(
+                        "https://ru.emexdwc.ae/Search.aspx?"
+                        f"n=06L145874E&vin={VIN}"
+                    ),
+                ),
+            ),
+            online_search_provider="Emex DWC VIN-каталог",
+        )
+        emex = SimpleNamespace(
+            search=lambda record: SimpleNamespace(
+                record=emex_record,
+                status="found",
+                summary="Emex returned turbo OEM numbers.",
+                checked_sources=("https://ru.emexdwc.ae/",),
+                details={"oem_numbers": ["06L145874E", "06L145722TX"]},
+            )
+        )
+
+        with tempfile.TemporaryDirectory() as temp_dir:
+            vin_store = VinStore(Path(temp_dir) / "vin_cache.sqlite")
+            unresolved = UnresolvedVinStore(
+                Path(temp_dir) / "vin_unresolved.sqlite"
+            )
+            notifier = CapturingNotifier()
+            service = VinAgentService(
+                enabled=True,
+                vin_store=vin_store,
+                unresolved_store=unresolved,
+                database=TurboDatabase(DATABASE_PATH),
+                emex_catalog=emex,
+                runner=UnexpectedRunner(),
+                notifier=notifier,
+                daily_limit=24,
+                retry_seconds=604_800,
+                notify_not_found=True,
+            )
+            service.initialize()
+            unresolved.record_failure(
+                VIN,
+                failure_code="no_supported_turbo_numbers",
+                observer_delay_seconds=0,
+            )
+
+            result = service.process_once()
+
+            self.assertEqual(result, "candidates_found")
+            pending = vin_store.lookup(VIN)
+            self.assertIsNotNone(pending)
+            self.assertEqual(
+                pending.fitments[0].articles,
+                ("AC-I085", "AC-I085-1e", "RHF5-031BR"),
+            )
+            self.assertIn("06L145874E", notifier.messages[0])
+            self.assertEqual(unresolved.list(), ())
+            attempts = unresolved.list_observer_attempts(vin=VIN)
+            self.assertEqual(len(attempts), 1)
+            self.assertEqual(attempts[0].stage, "emex")
+            self.assertEqual(attempts[0].status, "found")
 
 
 if __name__ == "__main__":

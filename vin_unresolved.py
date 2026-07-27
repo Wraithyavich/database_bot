@@ -1,10 +1,13 @@
 from __future__ import annotations
 
+import json
+import re
 import sqlite3
 from contextlib import closing
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
+from typing import Any
 
 from vin_search import VinRecord, extract_vin, utc_now
 
@@ -39,6 +42,18 @@ class VinObserverJob:
     next_attempt_at: str
     last_attempt_at: str
     last_result: str
+
+
+@dataclass(frozen=True)
+class VinObserverAttempt:
+    id: int
+    vin: str
+    attempted_at: str
+    stage: str
+    status: str
+    summary: str
+    checked_sources: tuple[str, ...]
+    report: Any
 
 
 class UnresolvedVinStore:
@@ -113,6 +128,20 @@ class UnresolvedVinStore:
                     attempt_count INTEGER NOT NULL
                         CHECK(attempt_count >= 0)
                 );
+
+                CREATE TABLE IF NOT EXISTS vin_observer_attempts(
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    vin TEXT NOT NULL,
+                    attempted_at TEXT NOT NULL,
+                    stage TEXT NOT NULL,
+                    status TEXT NOT NULL,
+                    summary TEXT NOT NULL,
+                    checked_sources_json TEXT NOT NULL,
+                    report_json TEXT NOT NULL
+                );
+
+                CREATE INDEX IF NOT EXISTS idx_vin_observer_attempts_vin
+                    ON vin_observer_attempts(vin, id DESC);
 
                 INSERT OR IGNORE INTO vin_observer_jobs(
                     vin, next_attempt_at
@@ -468,6 +497,120 @@ class UnresolvedVinStore:
             raise RuntimeError("VIN observer job does not exist")
         return _observer_job_from_row(row)
 
+    def record_observer_attempt(
+        self,
+        vin: str,
+        *,
+        stage: str,
+        status: str,
+        summary: str = "",
+        checked_sources: tuple[str, ...] = (),
+        report: Any = None,
+        now: str | None = None,
+    ) -> VinObserverAttempt:
+        normalized = extract_vin(vin)
+        if normalized is None:
+            raise ValueError("Invalid VIN")
+        cleaned_stage = stage.strip().lower()
+        cleaned_status = status.strip().lower()
+        if not re.fullmatch(r"[a-z0-9_-]{1,32}", cleaned_stage):
+            raise ValueError("Invalid observer attempt stage")
+        if not re.fullmatch(r"[a-z0-9_-]{1,32}", cleaned_status):
+            raise ValueError("Invalid observer attempt status")
+
+        attempted_at = _normalize_utc(now or utc_now())
+        cleaned_summary = " ".join(summary.split())[:2000]
+        cleaned_sources = tuple(
+            dict.fromkeys(
+                " ".join(str(source).split())[:1000]
+                for source in checked_sources[:20]
+                if " ".join(str(source).split())
+            )
+        )
+        sources_json = json.dumps(
+            cleaned_sources,
+            ensure_ascii=False,
+            separators=(",", ":"),
+        )
+        report_json = _bounded_json(report, max_length=20_000)
+
+        with closing(self._connect()) as connection:
+            cursor = connection.execute(
+                """
+                INSERT INTO vin_observer_attempts(
+                    vin,
+                    attempted_at,
+                    stage,
+                    status,
+                    summary,
+                    checked_sources_json,
+                    report_json
+                )
+                VALUES (?, ?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    normalized,
+                    attempted_at,
+                    cleaned_stage,
+                    cleaned_status,
+                    cleaned_summary,
+                    sources_json,
+                    report_json,
+                ),
+            )
+            attempt_id = int(cursor.lastrowid)
+            connection.execute(
+                """
+                DELETE FROM vin_observer_attempts
+                WHERE id NOT IN (
+                    SELECT id
+                    FROM vin_observer_attempts
+                    ORDER BY id DESC
+                    LIMIT 1000
+                )
+                """
+            )
+            row = connection.execute(
+                "SELECT * FROM vin_observer_attempts WHERE id = ?",
+                (attempt_id,),
+            ).fetchone()
+            connection.commit()
+        if row is None:
+            raise RuntimeError("Failed to persist VIN observer attempt")
+        return _observer_attempt_from_row(row)
+
+    def list_observer_attempts(
+        self,
+        *,
+        vin: str | None = None,
+        limit: int = 100,
+    ) -> tuple[VinObserverAttempt, ...]:
+        if limit < 1:
+            raise ValueError("limit must be positive")
+        parameters: tuple[Any, ...]
+        where = ""
+        if vin is None:
+            parameters = (limit,)
+        else:
+            normalized = extract_vin(vin)
+            if normalized is None:
+                raise ValueError("Invalid VIN")
+            where = "WHERE vin = ?"
+            parameters = (normalized, limit)
+
+        with closing(self._connect()) as connection:
+            rows = connection.execute(
+                f"""
+                SELECT *
+                FROM vin_observer_attempts
+                {where}
+                ORDER BY id DESC
+                LIMIT ?
+                """,
+                parameters,
+            ).fetchall()
+        return tuple(_observer_attempt_from_row(row) for row in rows)
+
     def list(self, *, limit: int = 100) -> tuple[UnresolvedVin, ...]:
         if limit < 1:
             raise ValueError("limit must be positive")
@@ -525,6 +668,50 @@ def _observer_job_from_row(row: sqlite3.Row) -> VinObserverJob:
         last_attempt_at=row["last_attempt_at"],
         last_result=row["last_result"],
     )
+
+
+def _observer_attempt_from_row(row: sqlite3.Row) -> VinObserverAttempt:
+    try:
+        checked_sources = tuple(json.loads(row["checked_sources_json"]))
+    except (TypeError, json.JSONDecodeError):
+        checked_sources = ()
+    try:
+        report = json.loads(row["report_json"])
+    except (TypeError, json.JSONDecodeError):
+        report = None
+    return VinObserverAttempt(
+        id=int(row["id"]),
+        vin=row["vin"],
+        attempted_at=row["attempted_at"],
+        stage=row["stage"],
+        status=row["status"],
+        summary=row["summary"],
+        checked_sources=checked_sources,
+        report=report,
+    )
+
+
+def _bounded_json(value: Any, *, max_length: int) -> str:
+    try:
+        encoded = json.dumps(
+            value,
+            ensure_ascii=False,
+            separators=(",", ":"),
+            default=str,
+        )
+    except (TypeError, ValueError):
+        encoded = json.dumps(str(value), ensure_ascii=False)
+    if len(encoded) <= max_length:
+        return encoded
+    truncated = json.dumps(
+        {
+            "truncated": True,
+            "preview": encoded[: max_length // 8],
+        },
+        ensure_ascii=False,
+        separators=(",", ":"),
+    )
+    return truncated
 
 
 def _normalize_utc(value: str) -> str:

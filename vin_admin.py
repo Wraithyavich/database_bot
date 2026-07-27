@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import argparse
 import csv
+import json
 import os
 from pathlib import Path
 
@@ -22,6 +23,7 @@ def main() -> None:
             "unresolved",
             "unresolved-stats",
             "export-unresolved",
+            "observer-attempts",
         ),
         help="Queue operation to run",
     )
@@ -40,6 +42,10 @@ def main() -> None:
     )
     parser.add_argument("--limit", type=int, default=100)
     parser.add_argument(
+        "--vin",
+        help="Optional VIN filter for observer-attempts",
+    )
+    parser.add_argument(
         "--output",
         help="CSV path for export-unresolved (defaults next to its database)",
     )
@@ -48,10 +54,31 @@ def main() -> None:
     if (
         args.command.startswith("unresolved")
         or args.command == "export-unresolved"
+        or args.command == "observer-attempts"
     ):
         unresolved_store = UnresolvedVinStore(args.unresolved_database)
         unresolved_store.initialize()
-        unresolved = unresolved_store.list(limit=args.limit)
+        if args.command == "observer-attempts":
+            for attempt in unresolved_store.list_observer_attempts(
+                vin=args.vin,
+                limit=args.limit,
+            ):
+                print(
+                    json.dumps(
+                        {
+                            "id": attempt.id,
+                            "vin": attempt.vin,
+                            "attempted_at": attempt.attempted_at,
+                            "stage": attempt.stage,
+                            "status": attempt.status,
+                            "summary": attempt.summary,
+                            "checked_sources": attempt.checked_sources,
+                            "report": attempt.report,
+                        },
+                        ensure_ascii=False,
+                    )
+                )
+            return
 
         if args.command == "unresolved-stats":
             stats = unresolved_store.stats()
@@ -61,6 +88,7 @@ def main() -> None:
             )
             return
 
+        unresolved = unresolved_store.list(limit=args.limit)
         if args.command == "export-unresolved":
             output = (
                 Path(args.output)

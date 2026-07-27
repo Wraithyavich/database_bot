@@ -429,6 +429,8 @@ class VinOnlineSearcherRouter:
 def attach_catalog_articles(
     record: VinRecord,
     database: TurboDatabase,
+    *,
+    include_all_matches: bool = False,
 ) -> VinRecord:
     enriched_fitments: list[VinFitment] = []
     for fitment in record.fitments:
@@ -441,7 +443,11 @@ def attach_catalog_articles(
                 allow_fallback=False,
             )
             for match in result.matches:
-                if CARTRIDGE_CATEGORY in match.categories:
+                is_cartridge = any(
+                    CARTRIDGE_CATEGORY in category
+                    for category in match.categories
+                )
+                if include_all_matches or is_cartridge:
                     articles.add(match.article)
 
         enriched_fitments.append(

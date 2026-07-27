@@ -173,12 +173,14 @@ VIN_OBSERVER_RETRY_SECONDS=86400
 строками с исправленными номерами. Автоматически найденные сведения не получают
 статус проверенных без подтверждения администратора.
 
-На production встроенный режим выключен. Вторую ступень выполняет отдельный
-контейнер `vin-agent` с Codex CLI. После неудачи Yandex бот записывает VIN в
-SQLite и немедленно отправляет внутренний HTTP-триггер этому контейнеру. Если
-триггер потерян при перезапуске, worker раз в минуту делает дешёвую локальную
-проверку SQLite без запуска модели. Codex вызывается только при наличии
-готового задания, поэтому пустое ожидание не расходует токены.
+На production встроенный режим выключен. Вторую и третью ступени выполняет
+отдельный контейнер `vin-agent`. После неудачи Yandex бот записывает VIN в
+SQLite и немедленно отправляет внутренний HTTP-триггер этому контейнеру.
+Сначала worker без ИИ проходит публичный VIN-каталог Emex по маршруту
+`VIN → автомобиль → группа 145-xxx → OEM` и сопоставляет OEM с локальной
+SQLite-базой. Codex запускается только тогда, когда Emex не вернул номер
+турбокомпрессора. Если триггер потерян при перезапуске, worker раз в минуту
+делает дешёвую локальную проверку SQLite без запуска модели.
 
 Codex-наблюдатель берёт только VIN, для которых первичный Yandex-этап не вернул
 OEM/Turbo P/N, и может использовать все доступные ему открытые
@@ -199,7 +201,8 @@ Codex-наблюдателем.
 VIN_AGENT_ENABLED=true
 VIN_AGENT_TRIGGER_TOKEN=long-random-secret
 VIN_AGENT_MODEL=gpt-5.6-luna
-VIN_AGENT_REASONING_EFFORT=low
+VIN_AGENT_REASONING_EFFORT=medium
+VIN_EMEX_TIMEOUT_SECONDS=20
 VIN_AGENT_DAILY_LIMIT=24
 VIN_AGENT_TIMEOUT_SECONDS=600
 VIN_AGENT_RETRY_SECONDS=604800
@@ -219,7 +222,9 @@ docker compose run --rm vin-agent codex login --device-auth
 Worker запускает Codex в read-only sandbox, не передаёт дочернему процессу
 Telegram-токен или ключи Yandex, ограничивает один поиск одним процессом и
 сохраняет найденный результат только как предварительный. Ответ администратора
-`Подтверждаю` переводит его в проверенный.
+`Подтверждаю` переводит его в проверенный. Для аудита сохраняются последние
+1000 подробных попыток Emex/Codex с итогом и списком проверенных источников;
+эти записи остаются после удаления VIN из очереди.
 
 Очереди и статистику можно посмотреть внутри контейнера:
 
@@ -228,6 +233,8 @@ docker exec database-bot python vin_admin.py stats
 docker exec database-bot python vin_admin.py pending
 docker exec database-bot python vin_admin.py unresolved-stats
 docker exec database-bot python vin_admin.py unresolved --limit 100
+docker exec database-bot python vin_admin.py observer-attempts --limit 100
+docker exec database-bot python vin_admin.py observer-attempts --vin WAUZZZF40KA080440
 docker exec database-bot python vin_admin.py export-unresolved --limit 1000
 docker cp database-bot:/data/vin_unresolved_export.csv .
 ```

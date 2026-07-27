@@ -18,6 +18,7 @@ from pathlib import Path
 from typing import Any
 
 from turbo_database import TurboDatabase, normalize_number
+from vin_emex_catalog import EmexCatalogError, EmexVinCatalog
 from vin_online_search import attach_catalog_articles
 from vin_search import (
     VinFitment,
@@ -239,8 +240,8 @@ def build_agent_prompt(record: VinRecord) -> str:
     return f"""
 Исследуй VIN {record.vin} как специалист по турбокомпрессорам.
 
-Это вторая ступень после Yandex API: Yandex уже не смог вернуть обоснованный
-OEM/Turbo P/N. Известные данные автомобиля:
+Это третья ступень поиска: Yandex API и прямой VIN-каталог Emex уже не смогли
+вернуть обоснованный OEM/Turbo P/N. Известные данные автомобиля:
 {json.dumps(known, ensure_ascii=False)}
 
 Используй live web search и все доступные публичные интернет-источники:
@@ -376,7 +377,7 @@ def split_message(text: str) -> tuple[str, ...]:
 def format_candidate_notification(record: VinRecord) -> str:
     lines = format_online_vin(record)
     if lines:
-        lines[0] = "🤖 Codex-наблюдатель нашёл возможные номера"
+        lines[0] = "🤖 VIN-наблюдатель нашёл возможные номера"
     lines = [
         line
         for line in lines
@@ -390,6 +391,47 @@ def format_candidate_notification(record: VinRecord) -> str:
         ]
     )
     return "\n".join(lines)
+
+
+def _document_checked_sources(document: dict[str, Any]) -> tuple[str, ...]:
+    values = document.get("checked_sources")
+    if not isinstance(values, list):
+        return ()
+    return tuple(
+        _bounded(value, 1000)
+        for value in values[:20]
+        if _bounded(value, 1000)
+    )
+
+
+def _vin_record_report(record: VinRecord) -> dict[str, Any]:
+    return {
+        "vin": record.vin,
+        "make": record.make,
+        "model": record.model,
+        "model_year": record.model_year,
+        "engine": record.engine,
+        "power_kw": record.power_kw,
+        "online_search_provider": record.online_search_provider,
+        "fitments": [
+            {
+                "position": fitment.position,
+                "oem_numbers": list(fitment.oem_numbers),
+                "turbo_numbers": list(fitment.turbo_numbers),
+                "articles": list(fitment.articles),
+                "evidence": fitment.evidence,
+            }
+            for fitment in record.fitments
+        ],
+        "sources": [
+            {
+                "label": source.label,
+                "url": source.url,
+            }
+            for source in record.sources
+        ],
+        "notes": record.notes,
+    }
 
 
 class TelegramNotifier:
@@ -461,6 +503,7 @@ class VinAgentService:
         vin_store: VinStore,
         unresolved_store: UnresolvedVinStore,
         database: TurboDatabase,
+        emex_catalog: EmexVinCatalog,
         runner: CodexRunner,
         notifier: TelegramNotifier,
         daily_limit: int,
@@ -471,6 +514,7 @@ class VinAgentService:
         self.vin_store = vin_store
         self.unresolved_store = unresolved_store
         self.database = database
+        self.emex_catalog = emex_catalog
         self.runner = runner
         self.notifier = notifier
         self.daily_limit = daily_limit
@@ -499,27 +543,72 @@ class VinAgentService:
             return "already_verified"
 
         try:
+            emex_report = self.emex_catalog.search(record)
+            emex_candidate = attach_catalog_articles(
+                emex_report.record,
+                self.database,
+                include_all_matches=True,
+            )
+            self.unresolved_store.record_observer_attempt(
+                job.vin,
+                stage="emex",
+                status=emex_report.status,
+                summary=emex_report.summary,
+                checked_sources=emex_report.checked_sources,
+                report={
+                    **emex_report.details,
+                    "candidate": _vin_record_report(emex_candidate),
+                },
+            )
+            if emex_candidate.fitments:
+                return self._save_and_notify(
+                    job.vin,
+                    emex_candidate,
+                    source="Emex DWC",
+                )
+            record = emex_report.record
+        except (EmexCatalogError, OSError, sqlite3.Error, ValueError) as error:
+            logger.warning(
+                "Прямой Emex-поиск не выполнен для VIN …%s: %s",
+                job.vin[-6:],
+                error,
+            )
+            self.unresolved_store.record_observer_attempt(
+                job.vin,
+                stage="emex",
+                status="error",
+                summary=str(error),
+                checked_sources=("https://ru.emexdwc.ae/",),
+                report={"error_type": type(error).__name__},
+            )
+
+        document: dict[str, Any] | None = None
+        try:
             document = self.runner.search(record)
             candidate = parse_agent_result(document, base_record=record)
-            candidate = attach_catalog_articles(candidate, self.database)
+            candidate = attach_catalog_articles(
+                candidate,
+                self.database,
+                include_all_matches=True,
+            )
+            checked_sources = _document_checked_sources(document)
+            self.unresolved_store.record_observer_attempt(
+                job.vin,
+                stage="codex",
+                status="found" if candidate.fitments else "not_found",
+                summary=candidate.notes,
+                checked_sources=checked_sources,
+                report={
+                    "codex_result": document,
+                    "candidate": _vin_record_report(candidate),
+                },
+            )
             if candidate.fitments:
-                candidate = self.vin_store.save_pending(candidate)
-                delivered = self.notifier.send(
-                    format_candidate_notification(candidate)
-                )
-                if delivered:
-                    self.unresolved_store.remove(job.vin)
-                    logger.info(
-                        "Codex-наблюдатель нашёл кандидатов для VIN …%s",
-                        job.vin[-6:],
-                    )
-                    return "candidates_found"
-                self.unresolved_store.complete_observer_attempt(
+                return self._save_and_notify(
                     job.vin,
-                    next_delay_seconds=600,
-                    result="candidate_notification_failed",
+                    candidate,
+                    source="Codex",
                 )
-                return "notification_failed"
 
             self.unresolved_store.complete_observer_attempt(
                 job.vin,
@@ -531,7 +620,7 @@ class VinAgentService:
                 self.notifier.send(
                     "\n".join(
                         (
-                            "🔎 Codex-наблюдатель не нашёл номер турбины",
+                            "🔎 VIN-наблюдатель не нашёл номер турбины",
                             f"VIN: {job.vin}",
                             checked,
                             "",
@@ -546,12 +635,48 @@ class VinAgentService:
                 job.vin[-6:],
                 error,
             )
+            self.unresolved_store.record_observer_attempt(
+                job.vin,
+                stage="codex",
+                status="error",
+                summary=str(error),
+                report={
+                    "error_type": type(error).__name__,
+                    "codex_result": document,
+                },
+            )
             self.unresolved_store.complete_observer_attempt(
                 job.vin,
                 next_delay_seconds=3600,
                 result="codex_agent_error",
             )
             return "agent_error"
+
+    def _save_and_notify(
+        self,
+        vin: str,
+        candidate: VinRecord,
+        *,
+        source: str,
+    ) -> str:
+        candidate = self.vin_store.save_pending(candidate)
+        delivered = self.notifier.send(
+            format_candidate_notification(candidate)
+        )
+        if delivered:
+            self.unresolved_store.remove(vin)
+            logger.info(
+                "%s-наблюдатель нашёл кандидатов для VIN …%s",
+                source,
+                vin[-6:],
+            )
+            return "candidates_found"
+        self.unresolved_store.complete_observer_attempt(
+            vin,
+            next_delay_seconds=600,
+            result="candidate_notification_failed",
+        )
+        return "notification_failed"
 
 
 class TriggerServer(HTTPServer):
@@ -625,7 +750,7 @@ def _service_from_environment() -> tuple[VinAgentService, int, int, str]:
     enabled = parse_boolean(os.environ.get("VIN_AGENT_ENABLED"))
     model = (os.environ.get("VIN_AGENT_MODEL") or "gpt-5.6-luna").strip()
     reasoning = (
-        os.environ.get("VIN_AGENT_REASONING_EFFORT") or "low"
+        os.environ.get("VIN_AGENT_REASONING_EFFORT") or "medium"
     ).strip().lower()
     service = VinAgentService(
         enabled=enabled,
@@ -642,6 +767,15 @@ def _service_from_environment() -> tuple[VinAgentService, int, int, str]:
             os.environ.get(
                 "DATABASE_PATH",
                 BASE_DIR / "turbo_search.sqlite",
+            )
+        ),
+        emex_catalog=EmexVinCatalog(
+            timeout=parse_bounded_integer(
+                os.environ.get("VIN_EMEX_TIMEOUT_SECONDS"),
+                default=20,
+                minimum=5,
+                maximum=60,
+                variable_name="VIN_EMEX_TIMEOUT_SECONDS",
             )
         ),
         runner=CodexRunner(

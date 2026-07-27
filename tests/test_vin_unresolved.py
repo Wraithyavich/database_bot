@@ -156,6 +156,32 @@ class UnresolvedVinStoreTests(unittest.TestCase):
         self.assertIsNotNone(first)
         self.assertIsNone(second)
 
+    def test_observer_attempt_report_survives_queue_removal(self) -> None:
+        self.store.record_failure(
+            UNKNOWN_VIN,
+            failure_code="no_supported_turbo_numbers",
+        )
+        stored = self.store.record_observer_attempt(
+            UNKNOWN_VIN,
+            stage="emex",
+            status="not_found",
+            summary="Vehicle found, turbo group missing.",
+            checked_sources=("https://ru.emexdwc.ae/Vehicles.aspx",),
+            report={
+                "vehicle_candidates": 1,
+                "turbo_units": [],
+            },
+            now="2099-01-01T00:00:00+00:00",
+        )
+
+        self.store.remove(UNKNOWN_VIN)
+        attempts = self.store.list_observer_attempts(vin=UNKNOWN_VIN)
+
+        self.assertEqual(attempts, (stored,))
+        self.assertEqual(attempts[0].stage, "emex")
+        self.assertEqual(attempts[0].status, "not_found")
+        self.assertEqual(attempts[0].report["vehicle_candidates"], 1)
+
     def test_exports_anonymous_csv_sample(self) -> None:
         self.store.record_failure(
             UNKNOWN_VIN,
