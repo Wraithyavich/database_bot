@@ -13,7 +13,7 @@ import threading
 import urllib.error
 import urllib.parse
 import urllib.request
-from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+from http.server import BaseHTTPRequestHandler, HTTPServer
 from pathlib import Path
 from typing import Any
 
@@ -554,9 +554,7 @@ class VinAgentService:
             return "agent_error"
 
 
-class TriggerServer(ThreadingHTTPServer):
-    daemon_threads = True
-
+class TriggerServer(HTTPServer):
     def __init__(
         self,
         address: tuple[str, int],

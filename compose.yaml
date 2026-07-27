@@ -76,7 +76,7 @@ services:
     cpus: 0.50
     mem_limit: 384m
     memswap_limit: 512m
-    pids_limit: 64
+    pids_limit: 96
     stop_grace_period: 30s
     healthcheck:
       test:
