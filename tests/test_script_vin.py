@@ -188,6 +188,12 @@ class VinMessageRoutingTests(unittest.TestCase):
                 ),
                 patch.object(script, "VIN_UNRESOLVED_READY", True),
                 patch.object(script, "VIN_ONLINE_SEARCHER", searcher),
+                patch.object(script, "VIN_AGENT_ENABLED", True),
+                patch.object(
+                    script,
+                    "trigger_vin_agent",
+                    AsyncMock(),
+                ) as trigger,
                 patch.object(
                     script.VIN_DECODER,
                     "decode",
@@ -208,6 +214,7 @@ class VinMessageRoutingTests(unittest.TestCase):
         self.assertIn("Yandex не нашёл обоснованных OEM/Turbo P/N", reply)
         self.assertIn("передан агенту-наблюдателю", reply)
         self.assertNotIn("Возможные номера турбокомпрессоров", reply)
+        trigger.assert_awaited_once_with(unknown_vin)
 
     def test_unknown_vin_is_still_queued_without_api_key(self) -> None:
         unknown_vin = "SALWR2VF0FA000002"

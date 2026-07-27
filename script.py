@@ -1,8 +1,11 @@
 import asyncio
+import json
 import logging
 import os
 import sqlite3
 import tempfile
+import urllib.error
+import urllib.request
 from contextlib import suppress
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
@@ -249,6 +252,28 @@ VIN_OBSERVER_RETRY_SECONDS = parse_bounded_integer(
     maximum=604_800,
     variable_name="VIN_OBSERVER_RETRY_SECONDS",
 )
+VIN_AGENT_ENABLED = parse_boolean(
+    os.environ.get("VIN_AGENT_ENABLED"),
+)
+VIN_AGENT_TRIGGER_URL = os.environ.get(
+    "VIN_AGENT_TRIGGER_URL",
+    "",
+).strip()
+VIN_AGENT_TRIGGER_TOKEN = os.environ.get(
+    "VIN_AGENT_TRIGGER_TOKEN",
+    "",
+).strip()
+if VIN_AGENT_ENABLED and (
+    not VIN_AGENT_TRIGGER_URL or not VIN_AGENT_TRIGGER_TOKEN
+):
+    raise ValueError(
+        "VIN_AGENT_TRIGGER_URL and VIN_AGENT_TRIGGER_TOKEN are required "
+        "when VIN_AGENT_ENABLED=true"
+    )
+if VIN_AGENT_ENABLED and VIN_OBSERVER_ENABLED:
+    raise ValueError(
+        "VIN_AGENT_ENABLED and VIN_OBSERVER_ENABLED cannot be enabled together"
+    )
 DAILY_GREETING_USER_ID = parse_optional_user_id(
     os.environ.get("DAILY_GREETING_USER_ID")
     or os.environ.get("VIN_DAILY_GREETING_USER_ID")
@@ -582,7 +607,9 @@ async def update_unresolved_vin(
                 failure_code=failure_code,
                 failure_detail=failure_detail,
                 record=record,
-                observer_delay_seconds=VIN_OBSERVER_RETRY_SECONDS,
+                observer_delay_seconds=(
+                    0 if VIN_AGENT_ENABLED else VIN_OBSERVER_RETRY_SECONDS
+                ),
             )
             if bot is not None and VIN_ADMIN_USER_IDS:
                 await notify_vin_admins(
@@ -590,12 +617,48 @@ async def update_unresolved_vin(
                     record,
                     failure_detail=failure_detail or failure_code,
                 )
+            await trigger_vin_agent(record.vin)
         else:
             await asyncio.to_thread(VIN_UNRESOLVED_STORE.remove, record.vin)
     except (OSError, sqlite3.Error, RuntimeError, ValueError):
         logger.exception(
             "Не удалось обновить отдельную базу неразобранных VIN …%s",
             record.vin[-6:],
+        )
+
+
+async def trigger_vin_agent(vin: str) -> None:
+    if not VIN_AGENT_ENABLED:
+        return
+
+    def send_trigger() -> None:
+        request = urllib.request.Request(
+            VIN_AGENT_TRIGGER_URL,
+            data=json.dumps({"vin": vin}).encode("utf-8"),
+            headers={
+                "Content-Type": "application/json",
+                "X-Observer-Token": VIN_AGENT_TRIGGER_TOKEN,
+                "User-Agent": "database-bot/1.0",
+            },
+            method="POST",
+        )
+        with urllib.request.urlopen(request, timeout=2) as response:
+            if response.status != 202:
+                raise OSError(
+                    f"VIN agent trigger returned HTTP {response.status}"
+                )
+            response.read(4096)
+
+    try:
+        await asyncio.to_thread(send_trigger)
+    except (OSError, urllib.error.URLError):
+        # The SQLite queue is authoritative. The worker performs a cheap
+        # model-free rescue scan, so a lost HTTP wake-up does not lose the VIN.
+        logger.warning(
+            "Не удалось немедленно разбудить VIN agent для VIN …%s; "
+            "запрос остаётся в очереди",
+            vin[-6:],
+            exc_info=True,
         )
 
 
@@ -1271,6 +1334,11 @@ def main() -> None:
         if YANDEX_VIN_SEARCHER.api_key and not YANDEX_VIN_SEARCHER.folder_id:
             logger.warning(
                 "Yandex Search API не активирован: YANDEX_FOLDER_ID не задан"
+            )
+        if VIN_AGENT_ENABLED:
+            logger.info(
+                "Событийный Codex-наблюдатель включён: %s",
+                VIN_AGENT_TRIGGER_URL,
             )
 
     try:

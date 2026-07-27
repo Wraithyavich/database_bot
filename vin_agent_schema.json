@@ -1,0 +1,90 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "type": "object",
+  "additionalProperties": false,
+  "properties": {
+    "status": {
+      "type": "string",
+      "enum": ["found", "not_found"]
+    },
+    "vin": {
+      "type": "string",
+      "pattern": "^[A-HJ-NPR-Z0-9]{17}$"
+    },
+    "vehicle": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "make": {"type": "string"},
+        "model": {"type": "string"},
+        "model_year": {"type": "string"},
+        "engine": {"type": "string"},
+        "power_kw": {"type": "string"}
+      },
+      "required": ["make", "model", "model_year", "engine", "power_kw"]
+    },
+    "fitments": {
+      "type": "array",
+      "maxItems": 6,
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "properties": {
+          "position": {"type": "string"},
+          "oem_numbers": {
+            "type": "array",
+            "items": {"type": "string"},
+            "maxItems": 12
+          },
+          "turbo_numbers": {
+            "type": "array",
+            "items": {"type": "string"},
+            "maxItems": 12
+          },
+          "evidence": {"type": "string"}
+        },
+        "required": [
+          "position",
+          "oem_numbers",
+          "turbo_numbers",
+          "evidence"
+        ]
+      }
+    },
+    "sources": {
+      "type": "array",
+      "maxItems": 10,
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "properties": {
+          "label": {"type": "string"},
+          "url": {"type": "string"}
+        },
+        "required": ["label", "url"]
+      }
+    },
+    "checked_sources": {
+      "type": "array",
+      "maxItems": 20,
+      "items": {"type": "string"}
+    },
+    "confidence": {
+      "type": "string",
+      "enum": ["low", "medium", "high"]
+    },
+    "summary": {
+      "type": "string"
+    }
+  },
+  "required": [
+    "status",
+    "vin",
+    "vehicle",
+    "fitments",
+    "sources",
+    "checked_sources",
+    "confidence",
+    "summary"
+  ]
+}

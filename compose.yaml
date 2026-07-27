@@ -13,6 +13,9 @@ services:
       DATABASE_PATH: /app/turbo_search.sqlite
       VIN_DATABASE_PATH: /data/vin_cache.sqlite
       VIN_UNRESOLVED_DATABASE_PATH: /data/vin_unresolved.sqlite
+      VIN_AGENT_ENABLED: ${VIN_AGENT_ENABLED:-false}
+      VIN_AGENT_TRIGGER_URL: http://vin-agent:8090/trigger
+      VIN_AGENT_TRIGGER_TOKEN: ${VIN_AGENT_TRIGGER_TOKEN:-}
     volumes:
       - vin-data:/data
     init: true
@@ -28,6 +31,63 @@ services:
     memswap_limit: 1600m
     pids_limit: 128
     stop_grace_period: 30s
+    logging:
+      driver: json-file
+      options:
+        max-size: 10m
+        max-file: "3"
+
+  vin-agent:
+    build:
+      context: .
+      dockerfile: Dockerfile.vin-agent
+    image: database-bot-vin-agent:latest
+    container_name: database-bot-vin-agent
+    restart: unless-stopped
+    environment:
+      VIN_AGENT_ENABLED: ${VIN_AGENT_ENABLED:-false}
+      VIN_AGENT_TRIGGER_TOKEN: ${VIN_AGENT_TRIGGER_TOKEN:-}
+      VIN_AGENT_MODEL: ${VIN_AGENT_MODEL:-gpt-5.6-luna}
+      VIN_AGENT_REASONING_EFFORT: ${VIN_AGENT_REASONING_EFFORT:-low}
+      VIN_AGENT_DAILY_LIMIT: ${VIN_AGENT_DAILY_LIMIT:-24}
+      VIN_AGENT_RETRY_SECONDS: ${VIN_AGENT_RETRY_SECONDS:-604800}
+      VIN_AGENT_TIMEOUT_SECONDS: ${VIN_AGENT_TIMEOUT_SECONDS:-600}
+      VIN_AGENT_RESCUE_POLL_SECONDS: ${VIN_AGENT_RESCUE_POLL_SECONDS:-60}
+      VIN_AGENT_NOTIFY_NOT_FOUND: ${VIN_AGENT_NOTIFY_NOT_FOUND:-true}
+      VIN_DATABASE_PATH: /data/vin_cache.sqlite
+      VIN_UNRESOLVED_DATABASE_PATH: /data/vin_unresolved.sqlite
+      DATABASE_PATH: /workspace/turbo_search.sqlite
+      TELEGRAM_BOT_TOKEN: ${API_TOKEN:-}
+      VIN_ADMIN_USER_IDS: ${VIN_ADMIN_USER_IDS:-}
+      VIN_AGENT_PORT: "8090"
+    volumes:
+      - vin-data:/data
+      - ./.codex-observer:/home/observer/.codex
+    expose:
+      - "8090"
+    init: true
+    read_only: true
+    tmpfs:
+      - /tmp:rw,noexec,nosuid,size=67108864,mode=1777
+    cap_drop:
+      - ALL
+    security_opt:
+      - no-new-privileges:true
+    cpus: 0.50
+    mem_limit: 384m
+    memswap_limit: 512m
+    pids_limit: 64
+    stop_grace_period: 30s
+    healthcheck:
+      test:
+        - CMD
+        - python3
+        - -c
+        - "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8090/health', timeout=2).read()"
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 10s
     logging:
       driver: json-file
       options:
