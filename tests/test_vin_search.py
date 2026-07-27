@@ -127,6 +127,28 @@ class VinStoreTests(unittest.TestCase):
         self.assertEqual(self.store.stats().verified, 2)
         self.assertEqual(self.store.stats().pending, 0)
 
+    def test_saves_observer_result_without_incrementing_requests(self) -> None:
+        unknown_vin = "SALWR2VF0FA000002"
+        pending = VinRecord(
+            vin=unknown_vin,
+            status="pending",
+            make="LAND ROVER",
+            fitments=(
+                VinFitment(
+                    position="Турбина",
+                    oem_numbers=(),
+                    turbo_numbers=("778400-0003",),
+                    articles=("GT17-092-1",),
+                ),
+            ),
+            online_search_at="2026-07-27T00:00:00+00:00",
+        )
+
+        self.store.save_pending(pending)
+
+        self.assertEqual(self.store.lookup(unknown_vin), pending)
+        self.assertEqual(self.store.stats().requests, 0)
+
     def test_persists_preliminary_online_result(self) -> None:
         unknown_vin = "SALWR2VF0FA000001"
         preliminary = VinRecord(

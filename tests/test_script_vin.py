@@ -365,6 +365,101 @@ class VinMessageRoutingTests(unittest.TestCase):
         reply = message.reply_text.await_args.args[0]
         self.assertIn("VIN сохранён как проверенный", reply)
 
+    def test_observer_finds_candidates_and_notifies_admin(self) -> None:
+        unknown_vin = "SALWR2VF0FA000006"
+        with tempfile.TemporaryDirectory() as temp_dir:
+            store = VinStore(Path(temp_dir) / "vin.sqlite")
+            store.initialize(seed_path=PROJECT_DIR / "vin_verified.json")
+            store.record_request(
+                unknown_vin,
+                decoded=VinRecord(
+                    vin=unknown_vin,
+                    status="pending",
+                    make="LAND ROVER",
+                ),
+            )
+            unresolved_store = UnresolvedVinStore(
+                Path(temp_dir) / "vin_unresolved.sqlite"
+            )
+            unresolved_store.initialize()
+            unresolved_store.record_failure(
+                unknown_vin,
+                failure_code="no_supported_turbo_numbers",
+                observer_delay_seconds=0,
+            )
+            preliminary = VinRecord(
+                vin=unknown_vin,
+                status="pending",
+                make="LAND ROVER",
+                fitments=(
+                    VinFitment(
+                        position="Левая",
+                        oem_numbers=(),
+                        turbo_numbers=("778400-0003",),
+                        articles=(),
+                        evidence="Найдено в Emex.",
+                    ),
+                ),
+                online_search_at="2026-07-27T00:00:00+00:00",
+                online_search_provider="Yandex + Emex",
+            )
+            searcher = SimpleNamespace(
+                enabled=True,
+                search=lambda record: preliminary,
+            )
+            bot = SimpleNamespace(send_message=AsyncMock())
+
+            with (
+                patch.object(script, "VIN_STORE", store),
+                patch.object(script, "VIN_SEARCH_READY", True),
+                patch.object(
+                    script,
+                    "VIN_UNRESOLVED_STORE",
+                    unresolved_store,
+                ),
+                patch.object(script, "VIN_UNRESOLVED_READY", True),
+                patch.object(script, "VIN_OBSERVER_ENABLED", True),
+                patch.object(script, "VIN_OBSERVER_DAILY_LIMIT", 5),
+                patch.object(script, "VIN_ONLINE_SEARCHER", searcher),
+            ):
+                result = asyncio.run(script.run_vin_observer_once(bot))
+                notification = bot.send_message.await_args.kwargs["text"]
+                admin_message = SimpleNamespace(
+                    text="Подтверждаю",
+                    chat_id=1219230738,
+                    reply_to_message=SimpleNamespace(
+                        message_id=8001,
+                        text=notification,
+                    ),
+                    reply_text=AsyncMock(),
+                )
+                asyncio.run(
+                    script.handle_message(
+                        SimpleNamespace(
+                            message=admin_message,
+                            effective_user=SimpleNamespace(id=1219230738),
+                        ),
+                        None,
+                    )
+                )
+
+            stored = store.lookup(unknown_vin)
+            unresolved = unresolved_store.list()
+
+        self.assertEqual(result, "candidates_found")
+        self.assertEqual(
+            stored.fitments[0].turbo_numbers,
+            ("778400-0003",),
+        )
+        self.assertEqual(stored.status, "verified")
+        self.assertEqual(unresolved, ())
+        self.assertIn(unknown_vin, notification)
+        self.assertIn("Подтверждаю", notification)
+        self.assertIn(
+            "VIN сохранён как проверенный",
+            admin_message.reply_text.await_args.args[0],
+        )
+
     def test_rejects_vin_from_user_outside_allowlist(self) -> None:
         message = SimpleNamespace(
             text="SALLSAAG4AA249280",

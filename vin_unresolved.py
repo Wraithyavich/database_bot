@@ -3,6 +3,7 @@ from __future__ import annotations
 import sqlite3
 from contextlib import closing
 from dataclasses import dataclass
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
 from vin_search import VinRecord, extract_vin, utc_now
@@ -29,6 +30,15 @@ class UnresolvedVin:
 class UnresolvedVinStats:
     unique_vins: int
     requests: int
+
+
+@dataclass(frozen=True)
+class VinObserverJob:
+    vin: str
+    attempt_count: int
+    next_attempt_at: str
+    last_attempt_at: str
+    last_result: str
 
 
 class UnresolvedVinStore:
@@ -83,6 +93,32 @@ class UnresolvedVinStore:
                     idx_unresolved_notifications_message
                     ON unresolved_notifications(admin_chat_id, message_id)
                     WHERE message_id IS NOT NULL;
+
+                CREATE TABLE IF NOT EXISTS vin_observer_jobs(
+                    vin TEXT PRIMARY KEY REFERENCES unresolved_vins(vin)
+                        ON DELETE CASCADE,
+                    attempt_count INTEGER NOT NULL DEFAULT 0
+                        CHECK(attempt_count >= 0),
+                    next_attempt_at TEXT NOT NULL,
+                    lease_until TEXT NOT NULL DEFAULT '',
+                    last_attempt_at TEXT NOT NULL DEFAULT '',
+                    last_result TEXT NOT NULL DEFAULT ''
+                );
+
+                CREATE INDEX IF NOT EXISTS idx_vin_observer_jobs_due
+                    ON vin_observer_jobs(next_attempt_at, lease_until);
+
+                CREATE TABLE IF NOT EXISTS vin_observer_daily_usage(
+                    usage_date TEXT PRIMARY KEY,
+                    attempt_count INTEGER NOT NULL
+                        CHECK(attempt_count >= 0)
+                );
+
+                INSERT OR IGNORE INTO vin_observer_jobs(
+                    vin, next_attempt_at
+                )
+                SELECT vin, CURRENT_TIMESTAMP
+                FROM unresolved_vins;
                 """
             )
             connection.commit()
@@ -95,6 +131,7 @@ class UnresolvedVinStore:
         failure_code: str,
         failure_detail: str = "",
         record: VinRecord | None = None,
+        observer_delay_seconds: int = 86_400,
     ) -> UnresolvedVin:
         normalized = extract_vin(vin)
         if normalized is None:
@@ -104,8 +141,14 @@ class UnresolvedVinStore:
             raise ValueError("failure_code must not be empty")
         if record is not None and record.vin != normalized:
             raise ValueError("VIN record does not match request")
+        if observer_delay_seconds < 0:
+            raise ValueError("observer_delay_seconds must not be negative")
 
         now = utc_now()
+        next_attempt_at = _utc_after(
+            observer_delay_seconds,
+            base=now,
+        )
         values = {
             "make": record.make if record is not None else "",
             "model": record.model if record is not None else "",
@@ -189,6 +232,15 @@ class UnresolvedVinStore:
                     now,
                     now,
                 ),
+            )
+            connection.execute(
+                """
+                INSERT OR IGNORE INTO vin_observer_jobs(
+                    vin, next_attempt_at
+                )
+                VALUES (?, ?)
+                """,
+                (normalized, next_attempt_at),
             )
             connection.commit()
             row = connection.execute(
@@ -295,6 +347,127 @@ class UnresolvedVinStore:
             ).fetchone()
         return str(row["vin"]) if row is not None else None
 
+    def claim_due_observer_job(
+        self,
+        *,
+        daily_limit: int,
+        lease_seconds: int = 600,
+        now: str | None = None,
+    ) -> VinObserverJob | None:
+        if daily_limit < 1:
+            raise ValueError("daily_limit must be positive")
+        if lease_seconds < 60:
+            raise ValueError("lease_seconds must be at least 60")
+        current = _normalize_utc(now or utc_now())
+        usage_date = current[:10]
+        lease_until = _utc_after(lease_seconds, base=current)
+
+        with closing(self._connect()) as connection:
+            connection.execute("BEGIN IMMEDIATE")
+            connection.execute(
+                """
+                INSERT OR IGNORE INTO vin_observer_daily_usage(
+                    usage_date, attempt_count
+                )
+                VALUES (?, 0)
+                """,
+                (usage_date,),
+            )
+            used = int(
+                connection.execute(
+                    """
+                    SELECT attempt_count
+                    FROM vin_observer_daily_usage
+                    WHERE usage_date = ?
+                    """,
+                    (usage_date,),
+                ).fetchone()["attempt_count"]
+            )
+            if used >= daily_limit:
+                connection.commit()
+                return None
+
+            row = connection.execute(
+                """
+                SELECT *
+                FROM vin_observer_jobs
+                WHERE next_attempt_at <= ?
+                  AND (lease_until = '' OR lease_until <= ?)
+                ORDER BY next_attempt_at, attempt_count, vin
+                LIMIT 1
+                """,
+                (current, current),
+            ).fetchone()
+            if row is None:
+                connection.commit()
+                return None
+
+            connection.execute(
+                """
+                UPDATE vin_observer_jobs
+                SET lease_until = ?
+                WHERE vin = ?
+                """,
+                (lease_until, row["vin"]),
+            )
+            connection.execute(
+                """
+                UPDATE vin_observer_daily_usage
+                SET attempt_count = attempt_count + 1
+                WHERE usage_date = ?
+                """,
+                (usage_date,),
+            )
+            connection.commit()
+        return _observer_job_from_row(row)
+
+    def complete_observer_attempt(
+        self,
+        vin: str,
+        *,
+        next_delay_seconds: int,
+        result: str,
+        now: str | None = None,
+    ) -> VinObserverJob:
+        normalized = extract_vin(vin)
+        if normalized is None:
+            raise ValueError("Invalid VIN")
+        if next_delay_seconds < 60:
+            raise ValueError("next_delay_seconds must be at least 60")
+        current = _normalize_utc(now or utc_now())
+        next_attempt_at = _utc_after(
+            next_delay_seconds,
+            base=current,
+        )
+        cleaned_result = " ".join(result.split())[:500]
+
+        with closing(self._connect()) as connection:
+            cursor = connection.execute(
+                """
+                UPDATE vin_observer_jobs
+                SET attempt_count = attempt_count + 1,
+                    next_attempt_at = ?,
+                    lease_until = '',
+                    last_attempt_at = ?,
+                    last_result = ?
+                WHERE vin = ?
+                """,
+                (
+                    next_attempt_at,
+                    current,
+                    cleaned_result,
+                    normalized,
+                ),
+            )
+            row = connection.execute(
+                "SELECT * FROM vin_observer_jobs WHERE vin = ?",
+                (normalized,),
+            ).fetchone()
+            connection.commit()
+        if cursor.rowcount != 1 or row is None:
+            raise RuntimeError("VIN observer job does not exist")
+        return _observer_job_from_row(row)
+
     def list(self, *, limit: int = 100) -> tuple[UnresolvedVin, ...]:
         if limit < 1:
             raise ValueError("limit must be positive")
@@ -342,3 +515,29 @@ def _unresolved_from_row(row: sqlite3.Row) -> UnresolvedVin:
         first_requested_at=row["first_requested_at"],
         last_requested_at=row["last_requested_at"],
     )
+
+
+def _observer_job_from_row(row: sqlite3.Row) -> VinObserverJob:
+    return VinObserverJob(
+        vin=row["vin"],
+        attempt_count=int(row["attempt_count"]),
+        next_attempt_at=row["next_attempt_at"],
+        last_attempt_at=row["last_attempt_at"],
+        last_result=row["last_result"],
+    )
+
+
+def _normalize_utc(value: str) -> str:
+    parsed = datetime.fromisoformat(value.replace("Z", "+00:00"))
+    if parsed.tzinfo is None:
+        parsed = parsed.replace(tzinfo=UTC)
+    return parsed.astimezone(UTC).replace(microsecond=0).isoformat()
+
+
+def _utc_after(seconds: int, *, base: str) -> str:
+    parsed = datetime.fromisoformat(base.replace("Z", "+00:00"))
+    if parsed.tzinfo is None:
+        parsed = parsed.replace(tzinfo=UTC)
+    return (
+        parsed.astimezone(UTC) + timedelta(seconds=seconds)
+    ).replace(microsecond=0).isoformat()

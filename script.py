@@ -3,6 +3,7 @@ import logging
 import os
 import sqlite3
 import tempfile
+from contextlib import suppress
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
@@ -47,7 +48,9 @@ from vin_search import (
 )
 from vin_admin_reply import (
     VinAdminReplyError,
+    confirm_admin_vin_record,
     format_admin_notification,
+    is_admin_confirmation,
     is_admin_reply_candidate,
     parse_admin_vin_reply,
 )
@@ -159,6 +162,36 @@ def parse_optional_user_id(value: str | None) -> int | None:
     return next(iter(parsed))
 
 
+def parse_boolean(value: str | None, *, default: bool = False) -> bool:
+    if value is None or not value.strip():
+        return default
+    normalized = value.strip().lower()
+    if normalized in {"1", "true", "yes", "on"}:
+        return True
+    if normalized in {"0", "false", "no", "off"}:
+        return False
+    raise ValueError("Boolean setting must be true or false")
+
+
+def parse_bounded_integer(
+    value: str | None,
+    *,
+    default: int,
+    minimum: int,
+    maximum: int,
+    variable_name: str,
+) -> int:
+    try:
+        parsed = default if value is None or not value.strip() else int(value)
+    except ValueError as error:
+        raise ValueError(f"{variable_name} must be an integer") from error
+    if not minimum <= parsed <= maximum:
+        raise ValueError(
+            f"{variable_name} must be between {minimum} and {maximum}"
+        )
+    return parsed
+
+
 DATABASE = TurboDatabase(resolve_database_path())
 OCR_RECOGNIZER = RapidOcrRecognizer()
 VIN_STORE = VinStore(resolve_vin_database_path())
@@ -185,6 +218,37 @@ VIN_ADMIN_USER_IDS = parse_allowed_user_ids(
     os.environ.get("VIN_ADMIN_USER_IDS"),
     variable_name="VIN_ADMIN_USER_IDS",
 )
+VIN_OBSERVER_ENABLED = parse_boolean(
+    os.environ.get("VIN_OBSERVER_ENABLED"),
+)
+VIN_OBSERVER_INTERVAL_SECONDS = parse_bounded_integer(
+    os.environ.get("VIN_OBSERVER_INTERVAL_SECONDS"),
+    default=900,
+    minimum=60,
+    maximum=86_400,
+    variable_name="VIN_OBSERVER_INTERVAL_SECONDS",
+)
+VIN_OBSERVER_INITIAL_DELAY_SECONDS = parse_bounded_integer(
+    os.environ.get("VIN_OBSERVER_INITIAL_DELAY_SECONDS"),
+    default=60,
+    minimum=5,
+    maximum=3_600,
+    variable_name="VIN_OBSERVER_INITIAL_DELAY_SECONDS",
+)
+VIN_OBSERVER_DAILY_LIMIT = parse_bounded_integer(
+    os.environ.get("VIN_OBSERVER_DAILY_LIMIT"),
+    default=5,
+    minimum=1,
+    maximum=50,
+    variable_name="VIN_OBSERVER_DAILY_LIMIT",
+)
+VIN_OBSERVER_RETRY_SECONDS = parse_bounded_integer(
+    os.environ.get("VIN_OBSERVER_RETRY_SECONDS"),
+    default=86_400,
+    minimum=3_600,
+    maximum=604_800,
+    variable_name="VIN_OBSERVER_RETRY_SECONDS",
+)
 DAILY_GREETING_USER_ID = parse_optional_user_id(
     os.environ.get("DAILY_GREETING_USER_ID")
     or os.environ.get("VIN_DAILY_GREETING_USER_ID")
@@ -201,6 +265,8 @@ OCR_SEMAPHORE = asyncio.Semaphore(1)
 VIN_ONLINE_SEMAPHORE = asyncio.Semaphore(1)
 MOSCOW_TIMEZONE = timezone(timedelta(hours=3))
 DAILY_GREETING_EVENT_KEY = "configured_vin_daily_greeting"
+VIN_OBSERVER_MAX_RETRY_SECONDS = 604_800
+VIN_OBSERVER_TASK: asyncio.Task[None] | None = None
 USER_IMAGE_RATE_LIMITER = SlidingWindowRateLimiter(
     limit=3,
     window_seconds=60,
@@ -516,6 +582,7 @@ async def update_unresolved_vin(
                 failure_code=failure_code,
                 failure_detail=failure_detail,
                 record=record,
+                observer_delay_seconds=VIN_OBSERVER_RETRY_SECONDS,
             )
             if bot is not None and VIN_ADMIN_USER_IDS:
                 await notify_vin_admins(
@@ -576,6 +643,218 @@ async def notify_vin_admins(
         )
 
 
+def format_observer_candidate_notification(record: VinRecord) -> str:
+    lines = format_online_vin(record)
+    if lines:
+        lines[0] = "🔄 VIN-наблюдатель нашёл возможные номера"
+    lines = [
+        line
+        for line in lines
+        if line != "VIN сохранён в очереди на ручную проверку."
+    ]
+    lines.extend(
+        [
+            "",
+            "Если результат верный, ответьте на это сообщение одним словом:",
+            "Подтверждаю",
+            "",
+            "Для исправления отправьте вместо этого строки с правильными "
+            "номерами, например:",
+            "Левая: KP39-015",
+            "Правая: KP39-020",
+        ]
+    )
+    return "\n".join(lines)
+
+
+async def notify_observer_candidates(
+    bot: object,
+    record: VinRecord,
+) -> bool:
+    if not VIN_ADMIN_USER_IDS:
+        return True
+    notification = format_observer_candidate_notification(record)
+    delivered = False
+    for admin_chat_id in sorted(VIN_ADMIN_USER_IDS):
+        try:
+            await bot.send_message(
+                chat_id=admin_chat_id,
+                text=notification,
+            )
+        except TelegramError:
+            logger.warning(
+                "Не удалось отправить найденный результат VIN …%s",
+                record.vin[-6:],
+                exc_info=True,
+            )
+        else:
+            delivered = True
+    return delivered
+
+
+async def run_vin_observer_once(bot: object) -> str:
+    if (
+        not VIN_OBSERVER_ENABLED
+        or not VIN_SEARCH_READY
+        or not VIN_UNRESOLVED_READY
+        or not VIN_ONLINE_SEARCHER.enabled
+    ):
+        return "disabled"
+
+    job = await asyncio.to_thread(
+        VIN_UNRESOLVED_STORE.claim_due_observer_job,
+        daily_limit=VIN_OBSERVER_DAILY_LIMIT,
+    )
+    if job is None:
+        return "idle"
+
+    try:
+        record = await asyncio.to_thread(VIN_STORE.lookup, job.vin)
+        if record is None:
+            record = VinRecord(vin=job.vin, status="pending")
+        if record.status == "verified":
+            await asyncio.to_thread(VIN_UNRESOLVED_STORE.remove, job.vin)
+            return "already_verified"
+
+        if not record.fitments:
+            async with VIN_ONLINE_SEMAPHORE:
+                latest = await asyncio.to_thread(VIN_STORE.lookup, job.vin)
+                if latest is not None and latest.status == "verified":
+                    await asyncio.to_thread(
+                        VIN_UNRESOLVED_STORE.remove,
+                        job.vin,
+                    )
+                    return "already_verified"
+                record = await asyncio.to_thread(
+                    VIN_ONLINE_SEARCHER.search,
+                    latest or record,
+                )
+                record = await asyncio.to_thread(
+                    attach_catalog_articles,
+                    record,
+                    DATABASE,
+                )
+                record = await asyncio.to_thread(
+                    VIN_STORE.save_pending,
+                    record,
+                )
+
+        if record.status == "verified":
+            await asyncio.to_thread(VIN_UNRESOLVED_STORE.remove, job.vin)
+            return "already_verified"
+
+        if record.fitments:
+            delivered = await notify_observer_candidates(bot, record)
+            if delivered:
+                await asyncio.to_thread(
+                    VIN_UNRESOLVED_STORE.remove,
+                    job.vin,
+                )
+                logger.info(
+                    "VIN-наблюдатель нашёл кандидатов для VIN …%s",
+                    job.vin[-6:],
+                )
+                return "candidates_found"
+            await asyncio.to_thread(
+                VIN_UNRESOLVED_STORE.complete_observer_attempt,
+                job.vin,
+                next_delay_seconds=3_600,
+                result="candidate_notification_failed",
+            )
+            return "notification_failed"
+
+        retry_seconds = min(
+            VIN_OBSERVER_RETRY_SECONDS
+            * (2 ** min(job.attempt_count, 3)),
+            VIN_OBSERVER_MAX_RETRY_SECONDS,
+        )
+        await asyncio.to_thread(
+            VIN_UNRESOLVED_STORE.complete_observer_attempt,
+            job.vin,
+            next_delay_seconds=retry_seconds,
+            result="no_supported_turbo_numbers",
+        )
+        logger.info(
+            "VIN-наблюдатель пока не нашёл номера для VIN …%s; "
+            "следующая попытка через %s сек.",
+            job.vin[-6:],
+            retry_seconds,
+        )
+        return "not_found"
+    except VinOnlineSearchError:
+        retry_seconds = min(VIN_OBSERVER_RETRY_SECONDS, 21_600)
+        with suppress(OSError, sqlite3.Error, RuntimeError, ValueError):
+            await asyncio.to_thread(
+                VIN_UNRESOLVED_STORE.complete_observer_attempt,
+                job.vin,
+                next_delay_seconds=retry_seconds,
+                result="online_search_error",
+            )
+        logger.warning(
+            "VIN-наблюдатель не смог выполнить поиск VIN …%s",
+            job.vin[-6:],
+            exc_info=True,
+        )
+        return "search_error"
+    except (OSError, sqlite3.Error, RuntimeError, ValueError):
+        logger.exception(
+            "Ошибка VIN-наблюдателя для VIN …%s",
+            job.vin[-6:],
+        )
+        with suppress(OSError, sqlite3.Error, RuntimeError, ValueError):
+            await asyncio.to_thread(
+                VIN_UNRESOLVED_STORE.complete_observer_attempt,
+                job.vin,
+                next_delay_seconds=3_600,
+                result="observer_error",
+            )
+        return "observer_error"
+
+
+async def vin_observer_loop(bot: object) -> None:
+    await asyncio.sleep(VIN_OBSERVER_INITIAL_DELAY_SECONDS)
+    while True:
+        try:
+            await run_vin_observer_once(bot)
+        except asyncio.CancelledError:
+            raise
+        except Exception:
+            logger.exception(
+                "Непредвиденная ошибка фонового VIN-наблюдателя"
+            )
+        await asyncio.sleep(VIN_OBSERVER_INTERVAL_SECONDS)
+
+
+async def application_post_init(application: Application) -> None:
+    global VIN_OBSERVER_TASK
+    if (
+        VIN_OBSERVER_ENABLED
+        and VIN_SEARCH_READY
+        and VIN_UNRESOLVED_READY
+        and VIN_ONLINE_SEARCHER.enabled
+    ):
+        VIN_OBSERVER_TASK = asyncio.create_task(
+            vin_observer_loop(application.bot),
+            name="vin-observer",
+        )
+        logger.info(
+            "VIN-наблюдатель запущен: один VIN каждые %s сек., "
+            "не более %s проверок в сутки",
+            VIN_OBSERVER_INTERVAL_SECONDS,
+            VIN_OBSERVER_DAILY_LIMIT,
+        )
+
+
+async def application_post_shutdown(application: Application) -> None:
+    global VIN_OBSERVER_TASK
+    if VIN_OBSERVER_TASK is None:
+        return
+    VIN_OBSERVER_TASK.cancel()
+    with suppress(asyncio.CancelledError):
+        await VIN_OBSERVER_TASK
+    VIN_OBSERVER_TASK = None
+
+
 async def handle_admin_vin_reply(
     update: Update,
     context: ContextTypes.DEFAULT_TYPE,
@@ -622,11 +901,18 @@ async def handle_admin_vin_reply(
 
     try:
         base_record = await asyncio.to_thread(VIN_STORE.lookup, vin)
-        verified = parse_admin_vin_reply(
-            raw_text,
-            vin=vin,
-            base_record=base_record,
-        )
+        if is_admin_confirmation(raw_text):
+            if base_record is None:
+                raise VinAdminReplyError(
+                    "Для этого VIN пока нет результата для подтверждения."
+                )
+            verified = confirm_admin_vin_record(base_record)
+        else:
+            verified = parse_admin_vin_reply(
+                raw_text,
+                vin=vin,
+                base_record=base_record,
+            )
         verified = await asyncio.to_thread(
             attach_catalog_articles,
             verified,
@@ -1033,6 +1319,8 @@ def main() -> None:
         .token(API_TOKEN)
         .update_queue(update_queue)
         .concurrent_updates(MAX_CONCURRENT_UPDATES)
+        .post_init(application_post_init)
+        .post_shutdown(application_post_shutdown)
         .build()
     )
     app.add_handler(CommandHandler("start", start))

@@ -107,6 +107,55 @@ class UnresolvedVinStoreTests(unittest.TestCase):
             self.store.find_notification_vin(1219230738, 5002)
         )
 
+    def test_observer_claims_due_job_and_reschedules_it(self) -> None:
+        self.store.record_failure(
+            UNKNOWN_VIN,
+            failure_code="no_supported_turbo_numbers",
+            observer_delay_seconds=0,
+        )
+
+        job = self.store.claim_due_observer_job(
+            daily_limit=5,
+            now="2099-01-01T00:00:00+00:00",
+        )
+        self.assertIsNotNone(job)
+        self.assertEqual(job.vin, UNKNOWN_VIN)
+        self.assertEqual(job.attempt_count, 0)
+
+        completed = self.store.complete_observer_attempt(
+            UNKNOWN_VIN,
+            next_delay_seconds=3600,
+            result="not found",
+            now="2099-01-01T00:00:10+00:00",
+        )
+        self.assertEqual(completed.attempt_count, 1)
+        self.assertEqual(completed.last_result, "not found")
+        self.assertEqual(
+            completed.next_attempt_at,
+            "2099-01-01T01:00:10+00:00",
+        )
+
+    def test_observer_enforces_persistent_daily_limit(self) -> None:
+        second_vin = "SALWR2VF0FA000002"
+        for vin in (UNKNOWN_VIN, second_vin):
+            self.store.record_failure(
+                vin,
+                failure_code="no_supported_turbo_numbers",
+                observer_delay_seconds=0,
+            )
+
+        first = self.store.claim_due_observer_job(
+            daily_limit=1,
+            now="2099-01-01T00:00:00+00:00",
+        )
+        second = self.store.claim_due_observer_job(
+            daily_limit=1,
+            now="2099-01-01T01:00:00+00:00",
+        )
+
+        self.assertIsNotNone(first)
+        self.assertIsNone(second)
+
     def test_exports_anonymous_csv_sample(self) -> None:
         self.store.record_failure(
             UNKNOWN_VIN,

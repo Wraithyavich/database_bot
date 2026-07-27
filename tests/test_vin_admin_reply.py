@@ -2,10 +2,12 @@ import unittest
 
 from vin_admin_reply import (
     VinAdminReplyError,
+    confirm_admin_vin_record,
+    is_admin_confirmation,
     is_admin_reply_candidate,
     parse_admin_vin_reply,
 )
-from vin_search import VinRecord
+from vin_search import VinFitment, VinRecord
 
 
 VIN = "SALLSAAG4AA249280"
@@ -65,6 +67,26 @@ class VinAdminReplyParserTests(unittest.TestCase):
                 "Турбина: KP39-015\nИсточник: emex.ru/example",
                 vin=VIN,
             )
+
+    def test_confirms_preliminary_observer_result(self) -> None:
+        preliminary = VinRecord(
+            vin=VIN,
+            status="pending",
+            fitments=(
+                VinFitment(
+                    position="Левая",
+                    oem_numbers=(),
+                    turbo_numbers=("KP39-015",),
+                    articles=(),
+                ),
+            ),
+        )
+
+        verified = confirm_admin_vin_record(preliminary)
+
+        self.assertTrue(is_admin_confirmation("Подтверждаю"))
+        self.assertEqual(verified.status, "verified")
+        self.assertTrue(verified.verified_at)
 
 
 if __name__ == "__main__":

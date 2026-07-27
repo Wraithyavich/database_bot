@@ -493,6 +493,44 @@ class VinStore:
             connection.commit()
         return record
 
+    def save_pending(self, record: VinRecord) -> VinRecord:
+        normalized = extract_vin(record.vin)
+        if normalized is None or normalized != record.vin:
+            raise ValueError("Invalid VIN")
+        if record.status != "pending":
+            raise ValueError("VIN record must be pending")
+
+        now = utc_now()
+        payload = json.dumps(
+            _record_to_dict(record),
+            ensure_ascii=False,
+            sort_keys=True,
+        )
+        with closing(self._connect()) as connection:
+            existing = connection.execute(
+                "SELECT status, payload_json FROM vin_records WHERE vin = ?",
+                (normalized,),
+            ).fetchone()
+            if existing is not None and existing["status"] == "verified":
+                return _record_from_dict(
+                    json.loads(existing["payload_json"])
+                )
+            connection.execute(
+                """
+                INSERT INTO vin_records(
+                    vin, status, payload_json, created_at, updated_at
+                )
+                VALUES (?, 'pending', ?, ?, ?)
+                ON CONFLICT(vin) DO UPDATE SET
+                    payload_json = excluded.payload_json,
+                    updated_at = excluded.updated_at
+                WHERE vin_records.status = 'pending'
+                """,
+                (normalized, payload, now, now),
+            )
+            connection.commit()
+        return record
+
     def pending(self, *, limit: int = 100) -> tuple[VinRecord, ...]:
         if limit < 1:
             raise ValueError("limit must be positive")

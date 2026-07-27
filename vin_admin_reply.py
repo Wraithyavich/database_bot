@@ -68,6 +68,10 @@ ADMIN_REPLY_MARKERS = frozenset(
         "примечание",
     }
 )
+ADMIN_CONFIRMATION_PATTERN = re.compile(
+    r"^\s*(?:подтверждаю|подтвердить|верно|сохранить)\s*[.!]?\s*$",
+    re.IGNORECASE,
+)
 
 
 def is_admin_reply_candidate(text: str) -> bool:
@@ -76,6 +80,30 @@ def is_admin_reply_candidate(text: str) -> bool:
         if match and _normalize_label(match.group(1)) in ADMIN_REPLY_MARKERS:
             return True
     return False
+
+
+def is_admin_confirmation(text: str) -> bool:
+    return ADMIN_CONFIRMATION_PATTERN.fullmatch(text) is not None
+
+
+def confirm_admin_vin_record(record: VinRecord) -> VinRecord:
+    if not record.fitments or not any(
+        fitment.oem_numbers or fitment.turbo_numbers
+        for fitment in record.fitments
+    ):
+        raise VinAdminReplyError(
+            "Для этого VIN пока нет найденных номеров, которые можно подтвердить."
+        )
+    note = "Результат подтверждён администратором."
+    notes = record.notes
+    if note not in notes:
+        notes = " ".join(part for part in (notes, note) if part)
+    return replace(
+        record,
+        status="verified",
+        notes=notes,
+        verified_at=utc_now(),
+    )
 
 
 def parse_admin_vin_reply(
