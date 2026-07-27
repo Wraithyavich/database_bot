@@ -10,6 +10,7 @@ ENV PYTHONDONTWRITEBYTECODE=1 \
 RUN apt-get update \
     && apt-get install --yes --no-install-recommends \
         ca-certificates \
+        bubblewrap \
         git \
         python3 \
     && npm install --global "@openai/codex@${CODEX_CLI_VERSION}" \
