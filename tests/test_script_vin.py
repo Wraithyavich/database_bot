@@ -140,6 +140,75 @@ class VinMessageRoutingTests(unittest.TestCase):
         self.assertIn("GT17-092-1", reply)
         self.assertIn("могут быть неточными", reply)
 
+    def test_vehicle_identity_without_part_numbers_goes_to_observer(self) -> None:
+        unknown_vin = "SALWR2VF0FA000007"
+        with tempfile.TemporaryDirectory() as temp_dir:
+            store = VinStore(Path(temp_dir) / "vin.sqlite")
+            store.initialize(seed_path=PROJECT_DIR / "vin_verified.json")
+            unresolved_store = UnresolvedVinStore(
+                Path(temp_dir) / "vin_unresolved.sqlite"
+            )
+            unresolved_store.initialize()
+            message = SimpleNamespace(
+                text=unknown_vin,
+                chat_id=127,
+                reply_text=AsyncMock(),
+            )
+            update = SimpleNamespace(
+                message=message,
+                effective_user=SimpleNamespace(id=987656),
+            )
+            decoded = VinRecord(
+                vin=unknown_vin,
+                status="pending",
+                make="LAND ROVER",
+            )
+            identity_only = VinRecord(
+                vin=unknown_vin,
+                status="pending",
+                make="LAND ROVER",
+                model="RANGE ROVER SPORT",
+                model_year="2015",
+                online_search_at="2026-07-27T00:00:00+00:00",
+                online_search_provider="Yandex Search API + Alice AI (Emex)",
+                notes="Автомобиль определён, номера турбин не найдены.",
+            )
+            searcher = SimpleNamespace(
+                enabled=True,
+                search=lambda record: identity_only,
+            )
+
+            with (
+                patch.object(script, "VIN_STORE", store),
+                patch.object(script, "VIN_SEARCH_READY", True),
+                patch.object(
+                    script,
+                    "VIN_UNRESOLVED_STORE",
+                    unresolved_store,
+                ),
+                patch.object(script, "VIN_UNRESOLVED_READY", True),
+                patch.object(script, "VIN_ONLINE_SEARCHER", searcher),
+                patch.object(
+                    script.VIN_DECODER,
+                    "decode",
+                    return_value=decoded,
+                ),
+            ):
+                asyncio.run(script.handle_message(update, None))
+
+            unresolved = unresolved_store.list()
+
+        self.assertEqual(len(unresolved), 1)
+        self.assertEqual(unresolved[0].vin, unknown_vin)
+        self.assertEqual(
+            unresolved[0].failure_code,
+            "no_supported_turbo_numbers",
+        )
+        reply = message.reply_text.await_args.args[0]
+        self.assertIn("Yandex не нашёл обоснованных OEM/Turbo P/N", reply)
+        self.assertIn("передан агенту-наблюдателю", reply)
+        self.assertNotIn("Возможные номера турбокомпрессоров", reply)
+
     def test_unknown_vin_is_still_queued_without_api_key(self) -> None:
         unknown_vin = "SALWR2VF0FA000002"
         with tempfile.TemporaryDirectory() as temp_dir:
