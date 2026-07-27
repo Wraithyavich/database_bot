@@ -207,11 +207,11 @@ VIN_AGENT_RESCUE_POLL_SECONDS=60
 ```
 
 Каталог `.codex-observer` хранит авторизацию Codex и не попадает в Git или
-Docker-образ. Перед первым включением создайте его с владельцем UID 10002,
+Docker-образ. Перед первым включением создайте его с владельцем UID 10001,
 соберите контейнер и выполните device login:
 
 ```bash
-install -d -m 700 -o 10002 -g 10002 .codex-observer
+install -d -m 700 -o 10001 -g 10001 .codex-observer
 docker compose build vin-agent
 docker compose run --rm vin-agent codex login --device-auth
 ```

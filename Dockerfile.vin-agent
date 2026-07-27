@@ -16,7 +16,7 @@ RUN apt-get update \
     && codex --version \
     && rm -rf /var/lib/apt/lists/* /root/.npm
 
-RUN useradd --create-home --uid 10002 observer \
+RUN useradd --create-home --uid 10001 observer \
     && install -d --owner=observer --group=observer /home/observer/.codex
 
 WORKDIR /workspace
