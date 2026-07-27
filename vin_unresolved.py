@@ -40,6 +40,7 @@ class UnresolvedVinStore:
     def _connect(self) -> sqlite3.Connection:
         connection = sqlite3.connect(self.path, timeout=5)
         connection.row_factory = sqlite3.Row
+        connection.execute("PRAGMA foreign_keys = ON")
         connection.execute("PRAGMA busy_timeout = 5000")
         return connection
 
@@ -67,6 +68,21 @@ class UnresolvedVinStore:
 
                 CREATE INDEX IF NOT EXISTS idx_unresolved_vins_priority
                     ON unresolved_vins(request_count DESC, last_requested_at DESC);
+
+                CREATE TABLE IF NOT EXISTS unresolved_notifications(
+                    vin TEXT NOT NULL REFERENCES unresolved_vins(vin)
+                        ON DELETE CASCADE,
+                    admin_chat_id INTEGER NOT NULL,
+                    claimed_at TEXT NOT NULL,
+                    sent_at TEXT NOT NULL DEFAULT '',
+                    message_id INTEGER,
+                    PRIMARY KEY(vin, admin_chat_id)
+                );
+
+                CREATE UNIQUE INDEX IF NOT EXISTS
+                    idx_unresolved_notifications_message
+                    ON unresolved_notifications(admin_chat_id, message_id)
+                    WHERE message_id IS NOT NULL;
                 """
             )
             connection.commit()
@@ -195,6 +211,89 @@ class UnresolvedVinStore:
             )
             connection.commit()
         return cursor.rowcount > 0
+
+    def claim_notification(self, vin: str, admin_chat_id: int) -> bool:
+        normalized = extract_vin(vin)
+        if normalized is None:
+            raise ValueError("Invalid VIN")
+        if admin_chat_id <= 0:
+            raise ValueError("admin_chat_id must be positive")
+
+        with closing(self._connect()) as connection:
+            cursor = connection.execute(
+                """
+                INSERT OR IGNORE INTO unresolved_notifications(
+                    vin, admin_chat_id, claimed_at
+                )
+                SELECT vin, ?, ?
+                FROM unresolved_vins
+                WHERE vin = ?
+                """,
+                (admin_chat_id, utc_now(), normalized),
+            )
+            connection.commit()
+        return cursor.rowcount > 0
+
+    def mark_notification_sent(
+        self,
+        vin: str,
+        admin_chat_id: int,
+        message_id: int,
+    ) -> None:
+        normalized = extract_vin(vin)
+        if normalized is None:
+            raise ValueError("Invalid VIN")
+        if admin_chat_id <= 0 or message_id <= 0:
+            raise ValueError("Telegram IDs must be positive")
+
+        with closing(self._connect()) as connection:
+            cursor = connection.execute(
+                """
+                UPDATE unresolved_notifications
+                SET sent_at = ?, message_id = ?
+                WHERE vin = ? AND admin_chat_id = ?
+                """,
+                (utc_now(), message_id, normalized, admin_chat_id),
+            )
+            connection.commit()
+        if cursor.rowcount != 1:
+            raise RuntimeError("VIN notification was not claimed")
+
+    def release_notification(self, vin: str, admin_chat_id: int) -> bool:
+        normalized = extract_vin(vin)
+        if normalized is None:
+            raise ValueError("Invalid VIN")
+        if admin_chat_id <= 0:
+            raise ValueError("admin_chat_id must be positive")
+
+        with closing(self._connect()) as connection:
+            cursor = connection.execute(
+                """
+                DELETE FROM unresolved_notifications
+                WHERE vin = ? AND admin_chat_id = ? AND sent_at = ''
+                """,
+                (normalized, admin_chat_id),
+            )
+            connection.commit()
+        return cursor.rowcount > 0
+
+    def find_notification_vin(
+        self,
+        admin_chat_id: int,
+        message_id: int,
+    ) -> str | None:
+        if admin_chat_id <= 0 or message_id <= 0:
+            return None
+        with closing(self._connect()) as connection:
+            row = connection.execute(
+                """
+                SELECT vin
+                FROM unresolved_notifications
+                WHERE admin_chat_id = ? AND message_id = ?
+                """,
+                (admin_chat_id, message_id),
+            ).fetchone()
+        return str(row["vin"]) if row is not None else None
 
     def list(self, *, limit: int = 100) -> tuple[UnresolvedVin, ...]:
         if limit < 1:

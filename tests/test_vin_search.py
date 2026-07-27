@@ -97,6 +97,36 @@ class VinStoreTests(unittest.TestCase):
             self.store.claim_daily_event("special-greeting", "2026-07-28")
         )
 
+    def test_saves_manual_verified_result(self) -> None:
+        unknown_vin = "SALWR2VF0FA000001"
+        self.store.record_request(
+            unknown_vin,
+            decoded=VinRecord(
+                vin=unknown_vin,
+                status="pending",
+                make="LAND ROVER",
+            ),
+        )
+        verified = VinRecord(
+            vin=unknown_vin,
+            status="verified",
+            make="LAND ROVER",
+            fitments=(
+                VinFitment(
+                    position="Левая",
+                    oem_numbers=(),
+                    turbo_numbers=("KP39-015",),
+                    articles=(),
+                ),
+            ),
+        )
+
+        self.store.save_verified(verified)
+
+        self.assertEqual(self.store.lookup(unknown_vin), verified)
+        self.assertEqual(self.store.stats().verified, 2)
+        self.assertEqual(self.store.stats().pending, 0)
+
     def test_persists_preliminary_online_result(self) -> None:
         unknown_vin = "SALWR2VF0FA000001"
         preliminary = VinRecord(

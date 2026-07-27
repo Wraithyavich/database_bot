@@ -458,6 +458,41 @@ class VinStore:
             connection.commit()
         return record
 
+    def save_verified(self, record: VinRecord) -> VinRecord:
+        normalized = extract_vin(record.vin)
+        if normalized is None or normalized != record.vin:
+            raise ValueError("Invalid VIN")
+        if record.status != "verified":
+            raise ValueError("VIN record must be verified")
+        if not record.fitments or not any(
+            fitment.oem_numbers or fitment.turbo_numbers
+            for fitment in record.fitments
+        ):
+            raise ValueError("Verified VIN must contain at least one part number")
+
+        now = utc_now()
+        payload = json.dumps(
+            _record_to_dict(record),
+            ensure_ascii=False,
+            sort_keys=True,
+        )
+        with closing(self._connect()) as connection:
+            connection.execute(
+                """
+                INSERT INTO vin_records(
+                    vin, status, payload_json, created_at, updated_at
+                )
+                VALUES (?, 'verified', ?, ?, ?)
+                ON CONFLICT(vin) DO UPDATE SET
+                    status = 'verified',
+                    payload_json = excluded.payload_json,
+                    updated_at = excluded.updated_at
+                """,
+                (normalized, payload, now, now),
+            )
+            connection.commit()
+        return record
+
     def pending(self, *, limit: int = 100) -> tuple[VinRecord, ...]:
         if limit < 1:
             raise ValueError("limit must be positive")

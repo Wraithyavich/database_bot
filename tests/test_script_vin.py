@@ -21,8 +21,15 @@ class VinMessageRoutingTests(unittest.TestCase):
             frozenset({456, 987654, 987655, 987656, 872931508}),
         )
         self.allowed_ids_patcher.start()
+        self.admin_ids_patcher = patch.object(
+            script,
+            "VIN_ADMIN_USER_IDS",
+            frozenset({1219230738}),
+        )
+        self.admin_ids_patcher.start()
 
     def tearDown(self) -> None:
+        self.admin_ids_patcher.stop()
         self.allowed_ids_patcher.stop()
 
     def test_verified_vin_is_routed_before_part_search(self) -> None:
@@ -223,6 +230,140 @@ class VinMessageRoutingTests(unittest.TestCase):
             "online_search_not_configured",
         )
         self.assertEqual(unresolved[0].make, "LAND ROVER")
+
+    def test_unprocessed_vin_notifies_admin_only_once(self) -> None:
+        unknown_vin = "SALWR2VF0FA000004"
+        with tempfile.TemporaryDirectory() as temp_dir:
+            store = VinStore(Path(temp_dir) / "vin.sqlite")
+            store.initialize(seed_path=PROJECT_DIR / "vin_verified.json")
+            unresolved_store = UnresolvedVinStore(
+                Path(temp_dir) / "vin_unresolved.sqlite"
+            )
+            unresolved_store.initialize()
+            bot = SimpleNamespace(
+                send_message=AsyncMock(
+                    return_value=SimpleNamespace(message_id=7001)
+                )
+            )
+            context = SimpleNamespace(bot=bot)
+
+            def make_update() -> SimpleNamespace:
+                return SimpleNamespace(
+                    message=SimpleNamespace(
+                        text=unknown_vin,
+                        chat_id=131,
+                        reply_text=AsyncMock(),
+                    ),
+                    effective_user=SimpleNamespace(id=987656),
+                )
+
+            with (
+                patch.object(script, "VIN_STORE", store),
+                patch.object(script, "VIN_SEARCH_READY", True),
+                patch.object(
+                    script,
+                    "VIN_UNRESOLVED_STORE",
+                    unresolved_store,
+                ),
+                patch.object(script, "VIN_UNRESOLVED_READY", True),
+                patch.object(
+                    script,
+                    "VIN_ONLINE_SEARCHER",
+                    SimpleNamespace(enabled=False),
+                ),
+                patch.object(
+                    script.VIN_DECODER,
+                    "decode",
+                    return_value=VinRecord(
+                        vin=unknown_vin,
+                        status="pending",
+                        make="LAND ROVER",
+                    ),
+                ),
+            ):
+                asyncio.run(script.handle_message(make_update(), context))
+                asyncio.run(script.handle_message(make_update(), context))
+
+            self.assertEqual(bot.send_message.await_count, 1)
+            notification = bot.send_message.await_args.kwargs["text"]
+            self.assertIn(unknown_vin, notification)
+            self.assertIn("Левая: KP39-015", notification)
+            self.assertEqual(
+                unresolved_store.find_notification_vin(
+                    1219230738,
+                    7001,
+                ),
+                unknown_vin,
+            )
+
+    def test_admin_reply_saves_verified_vin_and_clears_queue(self) -> None:
+        unknown_vin = "SALWR2VF0FA000005"
+        with tempfile.TemporaryDirectory() as temp_dir:
+            store = VinStore(Path(temp_dir) / "vin.sqlite")
+            store.initialize(seed_path=PROJECT_DIR / "vin_verified.json")
+            store.record_request(
+                unknown_vin,
+                decoded=VinRecord(
+                    vin=unknown_vin,
+                    status="pending",
+                    make="LAND ROVER",
+                ),
+            )
+            unresolved_store = UnresolvedVinStore(
+                Path(temp_dir) / "vin_unresolved.sqlite"
+            )
+            unresolved_store.initialize()
+            unresolved_store.record_failure(
+                unknown_vin,
+                failure_code="no_supported_turbo_numbers",
+            )
+            unresolved_store.claim_notification(unknown_vin, 1219230738)
+            unresolved_store.mark_notification_sent(
+                unknown_vin,
+                1219230738,
+                7002,
+            )
+            message = SimpleNamespace(
+                text=(
+                    "Левая: KP39-015\n"
+                    "Правая: KP39-020\n"
+                    "Источник: https://emex.ru/example"
+                ),
+                chat_id=1219230738,
+                reply_to_message=SimpleNamespace(
+                    message_id=7002,
+                    text=f"VIN: {unknown_vin}",
+                ),
+                reply_text=AsyncMock(),
+            )
+            update = SimpleNamespace(
+                message=message,
+                effective_user=SimpleNamespace(id=1219230738),
+            )
+
+            with (
+                patch.object(script, "VIN_STORE", store),
+                patch.object(script, "VIN_SEARCH_READY", True),
+                patch.object(
+                    script,
+                    "VIN_UNRESOLVED_STORE",
+                    unresolved_store,
+                ),
+                patch.object(script, "VIN_UNRESOLVED_READY", True),
+            ):
+                asyncio.run(script.handle_message(update, None))
+
+            stored = store.lookup(unknown_vin)
+            unresolved = unresolved_store.list()
+
+        self.assertEqual(stored.status, "verified")
+        self.assertEqual(
+            [fitment.turbo_numbers for fitment in stored.fitments],
+            [("KP39-015",), ("KP39-020",)],
+        )
+        self.assertEqual(unresolved, ())
+        reply = message.reply_text.await_args.args[0]
+        self.assertIn("VIN сохранён как проверенный", reply)
 
     def test_rejects_vin_from_user_outside_allowlist(self) -> None:
         message = SimpleNamespace(

@@ -62,6 +62,51 @@ class UnresolvedVinStoreTests(unittest.TestCase):
         self.assertFalse(self.store.remove(UNKNOWN_VIN))
         self.assertEqual(self.store.list(), ())
 
+    def test_claims_each_admin_notification_only_once(self) -> None:
+        self.store.record_failure(
+            UNKNOWN_VIN,
+            failure_code="online_search_error",
+        )
+
+        self.assertTrue(self.store.claim_notification(UNKNOWN_VIN, 1219230738))
+        self.assertFalse(self.store.claim_notification(UNKNOWN_VIN, 1219230738))
+        self.assertTrue(self.store.claim_notification(UNKNOWN_VIN, 479066342))
+
+        self.store.mark_notification_sent(
+            UNKNOWN_VIN,
+            1219230738,
+            5001,
+        )
+        self.assertEqual(
+            self.store.find_notification_vin(1219230738, 5001),
+            UNKNOWN_VIN,
+        )
+
+    def test_failed_notification_can_be_retried(self) -> None:
+        self.store.record_failure(
+            UNKNOWN_VIN,
+            failure_code="online_search_error",
+        )
+        self.assertTrue(self.store.claim_notification(UNKNOWN_VIN, 1219230738))
+        self.assertTrue(
+            self.store.release_notification(UNKNOWN_VIN, 1219230738)
+        )
+        self.assertTrue(self.store.claim_notification(UNKNOWN_VIN, 1219230738))
+
+    def test_removing_vin_removes_notification_mapping(self) -> None:
+        self.store.record_failure(
+            UNKNOWN_VIN,
+            failure_code="online_search_error",
+        )
+        self.store.claim_notification(UNKNOWN_VIN, 1219230738)
+        self.store.mark_notification_sent(UNKNOWN_VIN, 1219230738, 5002)
+
+        self.store.remove(UNKNOWN_VIN)
+
+        self.assertIsNone(
+            self.store.find_notification_vin(1219230738, 5002)
+        )
+
     def test_exports_anonymous_csv_sample(self) -> None:
         self.store.record_failure(
             UNKNOWN_VIN,
