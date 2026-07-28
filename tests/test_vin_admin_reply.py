@@ -61,6 +61,17 @@ class VinAdminReplyParserTests(unittest.TestCase):
                 vin=VIN,
             )
 
+    def test_accepts_turbo_pn_label(self) -> None:
+        record = parse_admin_vin_reply(
+            "Turbo P/N: 49335-00642",
+            vin=VIN,
+        )
+
+        self.assertEqual(
+            record.fitments[0].turbo_numbers,
+            ("49335-00642",),
+        )
+
     def test_rejects_invalid_source(self) -> None:
         with self.assertRaises(VinAdminReplyError):
             parse_admin_vin_reply(

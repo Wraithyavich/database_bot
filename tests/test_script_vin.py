@@ -135,10 +135,13 @@ class VinMessageRoutingTests(unittest.TestCase):
                 asyncio.run(script.handle_message(update, None))
 
         reply = message.reply_text.await_args.args[0]
-        self.assertIn("ПРЕДВАРИТЕЛЬНЫЙ", reply)
+        self.assertIn("Результат поиска по VIN", reply)
         self.assertIn("778400-0003", reply)
         self.assertIn("GT17-092-1", reply)
-        self.assertIn("могут быть неточными", reply)
+        self.assertIn("сверьте номер", reply)
+        self.assertIsNotNone(
+            message.reply_text.await_args.kwargs["reply_markup"]
+        )
 
     def test_vehicle_identity_without_part_numbers_goes_to_observer(self) -> None:
         unknown_vin = "SALWR2VF0FA000007"
@@ -152,7 +155,9 @@ class VinMessageRoutingTests(unittest.TestCase):
             message = SimpleNamespace(
                 text=unknown_vin,
                 chat_id=127,
-                reply_text=AsyncMock(),
+                reply_text=AsyncMock(
+                    return_value=SimpleNamespace(message_id=6001)
+                ),
             )
             update = SimpleNamespace(
                 message=message,
@@ -203,6 +208,9 @@ class VinMessageRoutingTests(unittest.TestCase):
                 asyncio.run(script.handle_message(update, None))
 
             unresolved = unresolved_store.list()
+            subscriptions = (
+                unresolved_store.pending_result_subscriptions(unknown_vin)
+            )
 
         self.assertEqual(len(unresolved), 1)
         self.assertEqual(unresolved[0].vin, unknown_vin)
@@ -211,9 +219,11 @@ class VinMessageRoutingTests(unittest.TestCase):
             "no_supported_turbo_numbers",
         )
         reply = message.reply_text.await_args.args[0]
-        self.assertIn("Yandex не нашёл обоснованных OEM/Turbo P/N", reply)
-        self.assertIn("передан агенту-наблюдателю", reply)
-        self.assertNotIn("Возможные номера турбокомпрессоров", reply)
+        self.assertIn("Ищу информацию по VIN", reply)
+        self.assertNotIn("Yandex", reply)
+        self.assertNotIn("Codex", reply)
+        self.assertEqual(subscriptions[0].user_id, 987656)
+        self.assertEqual(subscriptions[0].status_message_id, 6001)
         trigger.assert_awaited_once_with(unknown_vin)
 
     def test_unknown_vin_is_still_queued_without_api_key(self) -> None:
@@ -252,8 +262,11 @@ class VinMessageRoutingTests(unittest.TestCase):
         self.assertIsNotNone(queued)
         self.assertEqual(queued.status, "pending")
         reply = message.reply_text.await_args.args[0]
-        self.assertIn("сохранён в очереди", reply)
-        self.assertIn("Онлайн-поиск пока не настроен", reply)
+        self.assertIn("Номера турбины по VIN не найдены", reply)
+        self.assertNotIn("Онлайн-поиск", reply)
+        self.assertIsNotNone(
+            message.reply_text.await_args.kwargs["reply_markup"]
+        )
 
     def test_unprocessed_vin_is_written_to_separate_database(self) -> None:
         unknown_vin = "SALWR2VF0FA000003"
@@ -307,7 +320,7 @@ class VinMessageRoutingTests(unittest.TestCase):
         )
         self.assertEqual(unresolved[0].make, "LAND ROVER")
 
-    def test_unprocessed_vin_notifies_admin_only_once(self) -> None:
+    def test_unprocessed_vin_does_not_notify_admin_automatically(self) -> None:
         unknown_vin = "SALWR2VF0FA000004"
         with tempfile.TemporaryDirectory() as temp_dir:
             store = VinStore(Path(temp_dir) / "vin.sqlite")
@@ -360,17 +373,102 @@ class VinMessageRoutingTests(unittest.TestCase):
                 asyncio.run(script.handle_message(make_update(), context))
                 asyncio.run(script.handle_message(make_update(), context))
 
-            self.assertEqual(bot.send_message.await_count, 1)
-            notification = bot.send_message.await_args.kwargs["text"]
-            self.assertIn(unknown_vin, notification)
-            self.assertIn("Левая: KP39-015", notification)
-            self.assertEqual(
-                unresolved_store.find_notification_vin(
-                    1219230738,
-                    7001,
-                ),
-                unknown_vin,
+            self.assertEqual(bot.send_message.await_count, 0)
+
+    def test_manual_review_button_notifies_admin_and_returns_reply(self) -> None:
+        vin = "SALWR2VF0FA000008"
+        with tempfile.TemporaryDirectory() as temp_dir:
+            store = VinStore(Path(temp_dir) / "vin.sqlite")
+            store.initialize(seed_path=PROJECT_DIR / "vin_verified.json")
+            store.save_pending(
+                VinRecord(
+                    vin=vin,
+                    status="pending",
+                    make="LAND ROVER",
+                    fitments=(
+                        VinFitment(
+                            position="Турбина",
+                            oem_numbers=("LR012345",),
+                            turbo_numbers=(),
+                            articles=(),
+                        ),
+                    ),
+                )
             )
+            unresolved_store = UnresolvedVinStore(
+                Path(temp_dir) / "vin_unresolved.sqlite"
+            )
+            unresolved_store.initialize()
+            bot = SimpleNamespace(send_message=AsyncMock())
+            query = SimpleNamespace(
+                data=f"{script.VIN_MANUAL_CALLBACK_PREFIX}{vin}",
+                message=SimpleNamespace(chat_id=132),
+                answer=AsyncMock(),
+                edit_message_reply_markup=AsyncMock(),
+            )
+            requester_update = SimpleNamespace(
+                callback_query=query,
+                effective_user=SimpleNamespace(
+                    id=987656,
+                    username="requester",
+                ),
+            )
+            context = SimpleNamespace(bot=bot)
+
+            with (
+                patch.object(script, "VIN_STORE", store),
+                patch.object(script, "VIN_SEARCH_READY", True),
+                patch.object(
+                    script,
+                    "VIN_UNRESOLVED_STORE",
+                    unresolved_store,
+                ),
+                patch.object(script, "VIN_UNRESOLVED_READY", True),
+            ):
+                asyncio.run(
+                    script.handle_vin_manual_review(
+                        requester_update,
+                        context,
+                    )
+                )
+                admin_notification = bot.send_message.await_args.kwargs["text"]
+                admin_message = SimpleNamespace(
+                    text="OEM: LR099999",
+                    chat_id=1219230738,
+                    reply_to_message=SimpleNamespace(
+                        message_id=9001,
+                        text=admin_notification,
+                    ),
+                    reply_text=AsyncMock(),
+                )
+                asyncio.run(
+                    script.handle_message(
+                        SimpleNamespace(
+                            message=admin_message,
+                            effective_user=SimpleNamespace(id=1219230738),
+                        ),
+                        context,
+                    )
+                )
+
+            verified = store.lookup(vin)
+            pending_manual = unresolved_store.pending_manual_requests(vin)
+
+        self.assertIn("Запрошена ручная проверка", admin_notification)
+        self.assertIn("987656 (@requester)", admin_notification)
+        self.assertNotIn("Ответьте именно", admin_notification)
+        self.assertNotIn("KP39-015", admin_notification)
+        self.assertEqual(query.answer.await_args.args[0], "Запрос отправлен.")
+        self.assertIsNone(
+            query.edit_message_reply_markup.await_args.kwargs["reply_markup"]
+        )
+        self.assertEqual(verified.status, "verified")
+        self.assertEqual(verified.fitments[0].oem_numbers, ("LR099999",))
+        self.assertEqual(pending_manual, ())
+        user_delivery = bot.send_message.await_args_list[-1].kwargs
+        self.assertEqual(user_delivery["chat_id"], 132)
+        self.assertIn("Результат ручной проверки", user_delivery["text"])
+        self.assertIn("LR099999", user_delivery["text"])
 
     def test_admin_reply_saves_verified_vin_and_clears_queue(self) -> None:
         unknown_vin = "SALWR2VF0FA000005"
@@ -439,9 +537,9 @@ class VinMessageRoutingTests(unittest.TestCase):
         )
         self.assertEqual(unresolved, ())
         reply = message.reply_text.await_args.args[0]
-        self.assertIn("VIN сохранён как проверенный", reply)
+        self.assertIn("Результат сохранён и отправлен пользователю", reply)
 
-    def test_observer_finds_candidates_and_notifies_admin(self) -> None:
+    def test_observer_finds_candidates_and_returns_them_to_user(self) -> None:
         unknown_vin = "SALWR2VF0FA000006"
         with tempfile.TemporaryDirectory() as temp_dir:
             store = VinStore(Path(temp_dir) / "vin.sqlite")
@@ -463,6 +561,13 @@ class VinMessageRoutingTests(unittest.TestCase):
                 failure_code="no_supported_turbo_numbers",
                 observer_delay_seconds=0,
             )
+            unresolved_store.subscribe_result(
+                unknown_vin,
+                user_id=987656,
+                chat_id=132,
+                username="requester",
+                status_message_id=8001,
+            )
             preliminary = VinRecord(
                 vin=unknown_vin,
                 status="pending",
@@ -483,7 +588,10 @@ class VinMessageRoutingTests(unittest.TestCase):
                 enabled=True,
                 search=lambda record: preliminary,
             )
-            bot = SimpleNamespace(send_message=AsyncMock())
+            bot = SimpleNamespace(
+                edit_message_text=AsyncMock(),
+                send_message=AsyncMock(),
+            )
 
             with (
                 patch.object(script, "VIN_STORE", store),
@@ -499,41 +607,28 @@ class VinMessageRoutingTests(unittest.TestCase):
                 patch.object(script, "VIN_ONLINE_SEARCHER", searcher),
             ):
                 result = asyncio.run(script.run_vin_observer_once(bot))
-                notification = bot.send_message.await_args.kwargs["text"]
-                admin_message = SimpleNamespace(
-                    text="Подтверждаю",
-                    chat_id=1219230738,
-                    reply_to_message=SimpleNamespace(
-                        message_id=8001,
-                        text=notification,
-                    ),
-                    reply_text=AsyncMock(),
-                )
-                asyncio.run(
-                    script.handle_message(
-                        SimpleNamespace(
-                            message=admin_message,
-                            effective_user=SimpleNamespace(id=1219230738),
-                        ),
-                        None,
-                    )
-                )
 
             stored = store.lookup(unknown_vin)
             unresolved = unresolved_store.list()
+            subscriptions = (
+                unresolved_store.pending_result_subscriptions(unknown_vin)
+            )
 
         self.assertEqual(result, "candidates_found")
         self.assertEqual(
             stored.fitments[0].turbo_numbers,
             ("778400-0003",),
         )
-        self.assertEqual(stored.status, "verified")
+        self.assertEqual(stored.status, "pending")
         self.assertEqual(unresolved, ())
-        self.assertIn(unknown_vin, notification)
-        self.assertIn("Подтверждаю", notification)
+        self.assertEqual(subscriptions, ())
+        self.assertEqual(bot.send_message.await_count, 0)
         self.assertIn(
-            "VIN сохранён как проверенный",
-            admin_message.reply_text.await_args.args[0],
+            "778400-0003",
+            bot.edit_message_text.await_args.kwargs["text"],
+        )
+        self.assertIsNotNone(
+            bot.edit_message_text.await_args.kwargs["reply_markup"]
         )
 
     def test_rejects_vin_from_user_outside_allowlist(self) -> None:

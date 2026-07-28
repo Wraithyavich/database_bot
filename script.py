@@ -10,10 +10,11 @@ from contextlib import suppress
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
-from telegram import Update
+from telegram import InlineKeyboardButton, InlineKeyboardMarkup, Update
 from telegram.error import TelegramError
 from telegram.ext import (
     Application,
+    CallbackQueryHandler,
     CommandHandler,
     ContextTypes,
     MessageHandler,
@@ -45,8 +46,8 @@ from vin_search import (
     VinRecord,
     VinStore,
     extract_vin,
+    format_manual_vin,
     format_online_vin,
-    format_pending_vin,
     format_verified_vin,
 )
 from vin_admin_reply import (
@@ -97,6 +98,8 @@ ALLOWED_IMAGE_SUFFIXES = {
     ".webp",
 }
 VIN_SEED_PATH = BASE_DIR / "vin_verified.json"
+VIN_MANUAL_CALLBACK_PREFIX = "vin_review:"
+VIN_MANUAL_BUTTON_TEXT = "Запросить проверку"
 
 
 def resolve_database_path() -> Path:
@@ -458,11 +461,40 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     await update.message.reply_text(welcome_text, parse_mode="HTML")
 
 
+def vin_manual_review_markup(vin: str) -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup(
+        [
+            [
+                InlineKeyboardButton(
+                    VIN_MANUAL_BUTTON_TEXT,
+                    callback_data=f"{VIN_MANUAL_CALLBACK_PREFIX}{vin}",
+                )
+            ]
+        ]
+    )
+
+
+def format_vin_searching(vin: str) -> str:
+    return f"🔎 Ищу информацию по VIN…\n{vin}"
+
+
+def format_vin_not_found(vin: str) -> str:
+    return f"Номера турбины по VIN не найдены.\nVIN: {vin}"
+
+
+async def send_automatic_vin_result(
+    message: object,
+    record: VinRecord,
+) -> None:
+    await message.reply_text(
+        "\n".join(format_online_vin(record)),
+        reply_markup=vin_manual_review_markup(record.vin),
+    )
+
+
 async def handle_vin_query(
     update: Update,
     vin: str,
-    *,
-    bot: object | None = None,
 ) -> None:
     message = update.message
     if message is None:
@@ -478,115 +510,121 @@ async def handle_vin_query(
         record = await asyncio.to_thread(VIN_STORE.lookup, vin)
         if record is not None and record.status == "verified":
             await update_unresolved_vin(record)
-            lines = format_verified_vin(record)
-        else:
-            decoder_failed = False
-            online_search_note = ""
-            failure_code = ""
-            if record is None:
-                try:
-                    record = await asyncio.to_thread(VIN_DECODER.decode, vin)
-                except VinDecoderError:
-                    logger.warning(
-                        "Базовый VIN-декодер недоступен для VIN …%s",
-                        vin[-6:],
-                        exc_info=True,
-                    )
-                    decoder_failed = True
-                    failure_code = "vin_decoder_error"
-                    record = VinRecord(vin=vin, status="pending")
+            for chunk in split_long_message(format_verified_vin(record)):
+                await message.reply_text(chunk)
+            return
 
-            if not record.online_search_at:
-                if not VIN_ONLINE_SEARCHER.enabled:
-                    failure_code = "online_search_not_configured"
-                    online_search_note = (
-                        "Онлайн-поиск пока не настроен администратором."
-                    )
-                else:
-                    async with VIN_ONLINE_SEMAPHORE:
-                        latest = await asyncio.to_thread(
-                            VIN_STORE.lookup,
-                            vin,
-                        )
-                        if latest is not None and (
-                            latest.status == "verified"
-                            or latest.online_search_at
-                        ):
-                            record = latest
-                        else:
-                            try:
-                                record = await asyncio.to_thread(
-                                    VIN_ONLINE_SEARCHER.search,
-                                    record,
-                                )
-                                record = await asyncio.to_thread(
-                                    attach_catalog_articles,
-                                    record,
-                                    DATABASE,
-                                )
-                            except VinOnlineSearchError:
-                                failure_code = "online_search_error"
-                                logger.warning(
-                                    "Онлайн-поиск не выполнен для VIN …%s",
-                                    vin[-6:],
-                                    exc_info=True,
-                                )
-                                online_search_note = (
-                                    "Онлайн-поиск временно недоступен."
-                                )
+        online_search_note = ""
+        failure_code = ""
+        if record is None:
+            try:
+                record = await asyncio.to_thread(VIN_DECODER.decode, vin)
+            except VinDecoderError:
+                logger.warning(
+                    "Базовый VIN-декодер недоступен для VIN …%s",
+                    vin[-6:],
+                    exc_info=True,
+                )
+                failure_code = "vin_decoder_error"
+                record = VinRecord(vin=vin, status="pending")
 
-            record = await asyncio.to_thread(
-                VIN_STORE.record_request,
-                vin,
-                decoded=record,
-            )
-            if record.status == "verified":
-                await update_unresolved_vin(record)
-                lines = format_verified_vin(record)
-            elif record.online_search_at:
-                if record.fitments:
-                    await update_unresolved_vin(record)
-                else:
-                    failure_code = "no_supported_turbo_numbers"
-                    online_search_note = (
-                        "В открытых источниках не найдено достаточно "
-                        "обоснованных номеров турбин."
-                    )
-                    await update_unresolved_vin(
-                        record,
-                        failure_code=failure_code,
-                        failure_detail=online_search_note,
-                        bot=bot,
-                    )
-                lines = format_online_vin(record)
+        if not record.online_search_at:
+            if not VIN_ONLINE_SEARCHER.enabled:
+                failure_code = "online_search_not_configured"
+                online_search_note = "Онлайн-поиск не настроен."
             else:
-                await update_unresolved_vin(
-                    record,
-                    failure_code=failure_code or "vin_not_processed",
-                    failure_detail=online_search_note,
-                    bot=bot,
-                )
-                lines = format_pending_vin(
-                    record,
-                    decoder_failed=decoder_failed,
-                )
-                if online_search_note:
-                    lines.extend(["", online_search_note])
+                async with VIN_ONLINE_SEMAPHORE:
+                    latest = await asyncio.to_thread(
+                        VIN_STORE.lookup,
+                        vin,
+                    )
+                    if latest is not None and (
+                        latest.status == "verified"
+                        or latest.online_search_at
+                    ):
+                        record = latest
+                    else:
+                        try:
+                            record = await asyncio.to_thread(
+                                VIN_ONLINE_SEARCHER.search,
+                                record,
+                            )
+                            record = await asyncio.to_thread(
+                                attach_catalog_articles,
+                                record,
+                                DATABASE,
+                            )
+                        except VinOnlineSearchError:
+                            failure_code = "online_search_error"
+                            logger.warning(
+                                "Онлайн-поиск не выполнен для VIN …%s",
+                                vin[-6:],
+                                exc_info=True,
+                            )
+                            online_search_note = (
+                                "Онлайн-поиск временно недоступен."
+                            )
+
+        record = await asyncio.to_thread(
+            VIN_STORE.record_request,
+            vin,
+            decoded=record,
+        )
+        if record.status == "verified":
+            await update_unresolved_vin(record)
+            for chunk in split_long_message(format_verified_vin(record)):
+                await message.reply_text(chunk)
+            return
+
+        if record.fitments:
+            await update_unresolved_vin(record)
+            await send_automatic_vin_result(message, record)
+            return
+
+        if record.online_search_at:
+            failure_code = "no_supported_turbo_numbers"
+            online_search_note = "Автоматический поиск пока не дал результата."
+        else:
+            failure_code = failure_code or "vin_not_processed"
+
+        if not (VIN_AGENT_ENABLED or VIN_OBSERVER_ENABLED):
+            await update_unresolved_vin(
+                record,
+                failure_code=failure_code,
+                failure_detail=online_search_note,
+            )
+            await message.reply_text(
+                format_vin_not_found(vin),
+                reply_markup=vin_manual_review_markup(vin),
+            )
+            return
+
+        status_message = await message.reply_text(format_vin_searching(vin))
+        user = update.effective_user
+        await update_unresolved_vin(
+            record,
+            failure_code=failure_code,
+            failure_detail=online_search_note,
+            requester_user_id=user.id if user is not None else None,
+            requester_chat_id=message.chat_id,
+            requester_username=(
+                getattr(user, "username", "") or ""
+                if user is not None
+                else ""
+            ),
+            status_message_id=status_message.message_id,
+        )
     except (OSError, sqlite3.Error, RuntimeError, ValueError):
         logger.exception("Ошибка VIN-поиска для VIN …%s", vin[-6:])
         await update_unresolved_vin(
             VinRecord(vin=vin, status="pending"),
             failure_code="vin_pipeline_error",
             failure_detail="Внутренняя ошибка обработки VIN.",
-            bot=bot,
         )
         await message.reply_text(
             "❌ VIN-база временно недоступна. Попробуйте позднее."
         )
         return
-
-    for chunk in split_long_message(lines):
-        await message.reply_text(chunk)
 
 
 async def update_unresolved_vin(
@@ -594,7 +632,10 @@ async def update_unresolved_vin(
     *,
     failure_code: str = "",
     failure_detail: str = "",
-    bot: object | None = None,
+    requester_user_id: int | None = None,
+    requester_chat_id: int | None = None,
+    requester_username: str = "",
+    status_message_id: int | None = None,
 ) -> None:
     if not VIN_UNRESOLVED_READY:
         return
@@ -611,11 +652,18 @@ async def update_unresolved_vin(
                     0 if VIN_AGENT_ENABLED else VIN_OBSERVER_RETRY_SECONDS
                 ),
             )
-            if bot is not None and VIN_ADMIN_USER_IDS:
-                await notify_vin_admins(
-                    bot,
-                    record,
-                    failure_detail=failure_detail or failure_code,
+            if (
+                requester_user_id is not None
+                and requester_chat_id is not None
+                and status_message_id is not None
+            ):
+                await asyncio.to_thread(
+                    VIN_UNRESOLVED_STORE.subscribe_result,
+                    record.vin,
+                    user_id=requester_user_id,
+                    chat_id=requester_chat_id,
+                    username=requester_username,
+                    status_message_id=status_message_id,
                 )
             await trigger_vin_agent(record.vin)
         else:
@@ -662,81 +710,18 @@ async def trigger_vin_agent(vin: str) -> None:
         )
 
 
-async def notify_vin_admins(
+async def notify_manual_review_admins(
     bot: object,
     record: VinRecord,
     *,
-    failure_detail: str = "",
-) -> None:
+    user_id: int,
+    username: str = "",
+) -> bool:
     notification = format_admin_notification(
         record,
-        failure_detail=failure_detail,
+        user_id=user_id,
+        username=username,
     )
-    for admin_chat_id in sorted(VIN_ADMIN_USER_IDS):
-        claimed = await asyncio.to_thread(
-            VIN_UNRESOLVED_STORE.claim_notification,
-            record.vin,
-            admin_chat_id,
-        )
-        if not claimed:
-            continue
-        try:
-            sent_message = await bot.send_message(
-                chat_id=admin_chat_id,
-                text=notification,
-            )
-        except TelegramError:
-            await asyncio.to_thread(
-                VIN_UNRESOLVED_STORE.release_notification,
-                record.vin,
-                admin_chat_id,
-            )
-            logger.warning(
-                "Не удалось отправить администратору VIN …%s",
-                record.vin[-6:],
-                exc_info=True,
-            )
-            continue
-
-        await asyncio.to_thread(
-            VIN_UNRESOLVED_STORE.mark_notification_sent,
-            record.vin,
-            admin_chat_id,
-            sent_message.message_id,
-        )
-
-
-def format_observer_candidate_notification(record: VinRecord) -> str:
-    lines = format_online_vin(record)
-    if lines:
-        lines[0] = "🔄 VIN-наблюдатель нашёл возможные номера"
-    lines = [
-        line
-        for line in lines
-        if line != "VIN сохранён в очереди на ручную проверку."
-    ]
-    lines.extend(
-        [
-            "",
-            "Если результат верный, ответьте на это сообщение одним словом:",
-            "Подтверждаю",
-            "",
-            "Для исправления отправьте вместо этого строки с правильными "
-            "номерами, например:",
-            "Левая: KP39-015",
-            "Правая: KP39-020",
-        ]
-    )
-    return "\n".join(lines)
-
-
-async def notify_observer_candidates(
-    bot: object,
-    record: VinRecord,
-) -> bool:
-    if not VIN_ADMIN_USER_IDS:
-        return True
-    notification = format_observer_candidate_notification(record)
     delivered = False
     for admin_chat_id in sorted(VIN_ADMIN_USER_IDS):
         try:
@@ -746,13 +731,170 @@ async def notify_observer_candidates(
             )
         except TelegramError:
             logger.warning(
-                "Не удалось отправить найденный результат VIN …%s",
+                "Не удалось отправить ручной VIN-запрос …%s",
                 record.vin[-6:],
                 exc_info=True,
             )
         else:
             delivered = True
     return delivered
+
+
+async def deliver_subscribed_vin_result(
+    bot: object,
+    vin: str,
+    text: str,
+    *,
+    with_manual_button: bool = True,
+) -> bool:
+    subscriptions = await asyncio.to_thread(
+        VIN_UNRESOLVED_STORE.pending_result_subscriptions,
+        vin,
+    )
+    if not subscriptions:
+        return True
+    all_delivered = True
+    reply_markup = (
+        vin_manual_review_markup(vin)
+        if with_manual_button
+        else None
+    )
+    for subscription in subscriptions:
+        try:
+            await bot.edit_message_text(
+                chat_id=subscription.chat_id,
+                message_id=subscription.status_message_id,
+                text=text,
+                reply_markup=reply_markup,
+            )
+        except TelegramError:
+            try:
+                await bot.send_message(
+                    chat_id=subscription.chat_id,
+                    text=text,
+                    reply_markup=reply_markup,
+                )
+            except TelegramError:
+                all_delivered = False
+                logger.warning(
+                    "Не удалось отправить результат VIN …%s пользователю %s",
+                    vin[-6:],
+                    subscription.user_id,
+                    exc_info=True,
+                )
+                continue
+        await asyncio.to_thread(
+            VIN_UNRESOLVED_STORE.mark_result_delivered,
+            subscription.id,
+        )
+    return all_delivered
+
+
+async def handle_vin_manual_review(
+    update: Update,
+    context: ContextTypes.DEFAULT_TYPE,
+) -> None:
+    query = update.callback_query
+    user = update.effective_user
+    if query is None or user is None:
+        return
+    data = query.data or ""
+    if not data.startswith(VIN_MANUAL_CALLBACK_PREFIX):
+        return
+    vin = extract_vin(data.removeprefix(VIN_MANUAL_CALLBACK_PREFIX))
+    if vin is None or user.id not in VIN_ALLOWED_USER_IDS:
+        await query.answer("Запрос недоступен.", show_alert=True)
+        return
+    if not VIN_UNRESOLVED_READY or not VIN_ADMIN_USER_IDS:
+        await query.answer(
+            "Ручная проверка временно недоступна.",
+            show_alert=True,
+        )
+        return
+
+    message = query.message
+    chat_id = getattr(message, "chat_id", 0)
+    if not chat_id:
+        await query.answer("Не удалось определить чат.", show_alert=True)
+        return
+
+    try:
+        manual_request = await asyncio.to_thread(
+            VIN_UNRESOLVED_STORE.claim_manual_request,
+            vin,
+            user_id=user.id,
+            chat_id=chat_id,
+            username=getattr(user, "username", "") or "",
+        )
+        if manual_request is None:
+            await query.answer("Запрос уже отправлен.")
+            with suppress(TelegramError):
+                await query.edit_message_reply_markup(reply_markup=None)
+            return
+
+        record = await asyncio.to_thread(VIN_STORE.lookup, vin)
+        record = record or VinRecord(vin=vin, status="pending")
+        delivered = await notify_manual_review_admins(
+            context.bot,
+            record,
+            user_id=user.id,
+            username=getattr(user, "username", "") or "",
+        )
+        if not delivered:
+            await asyncio.to_thread(
+                VIN_UNRESOLVED_STORE.release_manual_request,
+                manual_request.id,
+            )
+            await query.answer(
+                "Не удалось передать запрос. Попробуйте позже.",
+                show_alert=True,
+            )
+            return
+    except (OSError, sqlite3.Error, RuntimeError, ValueError):
+        logger.exception(
+            "Не удалось обработать ручной VIN-запрос …%s",
+            vin[-6:],
+        )
+        await query.answer(
+            "Не удалось передать запрос. Попробуйте позже.",
+            show_alert=True,
+        )
+        return
+
+    with suppress(TelegramError):
+        await query.edit_message_reply_markup(reply_markup=None)
+    await query.answer("Запрос отправлен.")
+
+
+async def deliver_manual_vin_result(
+    bot: object,
+    record: VinRecord,
+) -> None:
+    if not VIN_UNRESOLVED_READY:
+        return
+    requests = await asyncio.to_thread(
+        VIN_UNRESOLVED_STORE.pending_manual_requests,
+        record.vin,
+    )
+    text = "\n".join(format_manual_vin(record))
+    for request in requests:
+        try:
+            await bot.send_message(
+                chat_id=request.chat_id,
+                text=text,
+            )
+        except TelegramError:
+            logger.warning(
+                "Не удалось вернуть ручной результат VIN …%s пользователю %s",
+                record.vin[-6:],
+                request.user_id,
+                exc_info=True,
+            )
+            continue
+        await asyncio.to_thread(
+            VIN_UNRESOLVED_STORE.mark_manual_request_completed,
+            request.id,
+        )
 
 
 async def run_vin_observer_once(bot: object) -> str:
@@ -807,7 +949,11 @@ async def run_vin_observer_once(bot: object) -> str:
             return "already_verified"
 
         if record.fitments:
-            delivered = await notify_observer_candidates(bot, record)
+            delivered = await deliver_subscribed_vin_result(
+                bot,
+                record.vin,
+                "\n".join(format_online_vin(record)),
+            )
             if delivered:
                 await asyncio.to_thread(
                     VIN_UNRESOLVED_STORE.remove,
@@ -836,6 +982,11 @@ async def run_vin_observer_once(bot: object) -> str:
             job.vin,
             next_delay_seconds=retry_seconds,
             result="no_supported_turbo_numbers",
+        )
+        await deliver_subscribed_vin_result(
+            bot,
+            job.vin,
+            format_vin_not_found(job.vin),
         )
         logger.info(
             "VIN-наблюдатель пока не нашёл номера для VIN …%s; "
@@ -987,15 +1138,15 @@ async def handle_admin_vin_reply(
         )
         if VIN_UNRESOLVED_READY:
             await asyncio.to_thread(VIN_UNRESOLVED_STORE.remove, vin)
+        if context is not None:
+            await deliver_manual_vin_result(context.bot, verified)
     except VinAdminReplyError as error:
         await message.reply_text(
             "❌ Не удалось сохранить VIN.\n"
             f"{error}\n\n"
-            "Ответьте на уведомление в таком формате:\n"
-            "Левая: KP39-015\n"
-            "Правая: KP39-020\n"
-            "OEM левая: A6560900380\n"
-            "Источник: https://..."
+            "Укажите номер одной строкой, например:\n"
+            "OEM: A6560900380\n"
+            "или Turbo P/N: KP39-015"
         )
         return True
     except (OSError, sqlite3.Error, RuntimeError, ValueError):
@@ -1009,14 +1160,10 @@ async def handle_admin_vin_reply(
         )
         return True
 
-    lines = [
-        "✅ VIN сохранён как проверенный. "
-        "Следующие запросы получат этот результат.",
-        "",
-        *format_verified_vin(verified),
-    ]
-    for chunk in split_long_message(lines):
-        await message.reply_text(chunk)
+    await message.reply_text(
+        "✅ Результат сохранён и отправлен пользователю.\n"
+        f"VIN: {verified.vin}"
+    )
     return True
 
 
@@ -1082,11 +1229,7 @@ async def _handle_message_request(
                     "🔒 Поиск по VIN доступен только допущенным пользователям."
                 )
             return
-        await handle_vin_query(
-            update,
-            vin,
-            bot=context.bot if context is not None else None,
-        )
+        await handle_vin_query(update, vin)
         return
 
     user_limit = USER_TEXT_RATE_LIMITER.allow(rate_limit_key)
@@ -1368,12 +1511,12 @@ def main() -> None:
 
     if VIN_ADMIN_USER_IDS:
         logger.info(
-            "Уведомления о неразобранных VIN включены: %s администраторов",
+            "Ручная проверка VIN доступна: %s администраторов",
             len(VIN_ADMIN_USER_IDS),
         )
     else:
         logger.warning(
-            "VIN_ADMIN_USER_IDS не задан: уведомления администратору выключены"
+            "VIN_ADMIN_USER_IDS не задан: ручная проверка VIN выключена"
         )
 
     if DAILY_GREETING_USER_ID is not None and DAILY_GREETING_TEXT:
@@ -1392,6 +1535,12 @@ def main() -> None:
         .build()
     )
     app.add_handler(CommandHandler("start", start))
+    app.add_handler(
+        CallbackQueryHandler(
+            handle_vin_manual_review,
+            pattern=f"^{VIN_MANUAL_CALLBACK_PREFIX}",
+        )
+    )
     app.add_handler(
         MessageHandler(filters.PHOTO | filters.Document.IMAGE, handle_image)
     )

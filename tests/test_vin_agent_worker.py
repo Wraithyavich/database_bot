@@ -1,16 +1,23 @@
 import json
+import io
 import os
 import subprocess
 import tempfile
 import unittest
+import urllib.parse
 from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import patch
 
 from turbo_database import TurboDatabase
-from vin_agent_worker import CodexRunner, VinAgentService, parse_agent_result
+from vin_agent_worker import (
+    CodexRunner,
+    TelegramNotifier,
+    VinAgentService,
+    parse_agent_result,
+)
 from vin_search import VinFitment, VinRecord, VinSource, VinStore
-from vin_unresolved import UnresolvedVinStore
+from vin_unresolved import UnresolvedVinStore, VinResultSubscription
 
 
 VIN = "SALWR2VF0FA000007"
@@ -141,6 +148,46 @@ class CodexRunnerTests(unittest.TestCase):
         self.assertIn("CODEX_HOME", captured_environment)
 
 
+class TelegramNotifierTests(unittest.TestCase):
+    def test_edits_waiting_message_with_manual_review_button(self) -> None:
+        captured = {}
+
+        def fake_urlopen(request, *, timeout):
+            captured["url"] = request.full_url
+            captured["data"] = urllib.parse.parse_qs(
+                request.data.decode("utf-8")
+            )
+            return io.BytesIO(b'{"ok": true}')
+
+        subscription = VinResultSubscription(
+            id=1,
+            vin=VIN,
+            user_id=456,
+            chat_id=456,
+            username="requester",
+            status_message_id=1001,
+            requested_at="2026-07-29T00:00:00+00:00",
+            delivered_at="",
+        )
+        with patch(
+            "vin_agent_worker.urllib.request.urlopen",
+            side_effect=fake_urlopen,
+        ):
+            delivered = TelegramNotifier("test-token").send_result(
+                subscription,
+                text=f"VIN: {VIN}\nOEM: LR012345",
+                vin=VIN,
+            )
+
+        self.assertTrue(delivered)
+        self.assertTrue(captured["url"].endswith("/editMessageText"))
+        self.assertEqual(captured["data"]["message_id"], ["1001"])
+        self.assertIn(
+            f"vin_review:{VIN}",
+            captured["data"]["reply_markup"][0],
+        )
+
+
 class VinAgentServiceTests(unittest.TestCase):
     def test_emex_result_skips_codex_and_maps_local_articles(self) -> None:
         class UnexpectedRunner:
@@ -151,7 +198,7 @@ class VinAgentServiceTests(unittest.TestCase):
             def __init__(self):
                 self.messages = []
 
-            def send(self, text):
+            def send_result(self, subscription, *, text, vin):
                 self.messages.append(text)
                 return True
 
@@ -213,6 +260,13 @@ class VinAgentServiceTests(unittest.TestCase):
                 VIN,
                 failure_code="no_supported_turbo_numbers",
                 observer_delay_seconds=0,
+            )
+            unresolved.subscribe_result(
+                VIN,
+                user_id=456,
+                chat_id=456,
+                username="tester",
+                status_message_id=1001,
             )
 
             result = service.process_once()

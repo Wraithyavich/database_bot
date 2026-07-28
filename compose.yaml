@@ -59,7 +59,6 @@ services:
       VIN_UNRESOLVED_DATABASE_PATH: /data/vin_unresolved.sqlite
       DATABASE_PATH: /workspace/turbo_search.sqlite
       TELEGRAM_BOT_TOKEN: ${API_TOKEN:-}
-      VIN_ADMIN_USER_IDS: ${VIN_ADMIN_USER_IDS:-}
       VIN_AGENT_PORT: "8090"
     volumes:
       - vin-data:/data

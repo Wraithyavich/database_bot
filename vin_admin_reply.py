@@ -35,6 +35,8 @@ POSITION_ALIASES = {
     "турбина": "Турбина",
     "турбо": "Турбина",
     "turbo": "Турбина",
+    "turbo p/n": "Турбина",
+    "turbo pn": "Турбина",
     "картридж": "Турбина",
 }
 VEHICLE_FIELDS = {
@@ -216,37 +218,30 @@ def parse_admin_vin_reply(
 def format_admin_notification(
     record: VinRecord,
     *,
-    failure_detail: str = "",
+    user_id: int | None = None,
+    username: str = "",
 ) -> str:
     vehicle = " ".join(part for part in (record.make, record.model) if part)
-    details = " / ".join(
-        part
-        for part in (record.model_year, record.engine, record.power_kw)
-        if part
-    )
     lines = [
-        "🛠 VIN требует ручной проверки",
+        "🛠 Запрошена ручная проверка",
         f"VIN: {record.vin}",
     ]
+    if user_id is not None:
+        sender = str(user_id)
+        if username:
+            sender += f" (@{username.lstrip('@')})"
+        lines.append(f"Отправитель: {sender}")
     if vehicle:
         lines.append(f"Автомобиль: {vehicle}")
-    if details:
-        lines.append(f"Год / двигатель / мощность: {details}")
-    if failure_detail:
-        lines.append(f"Причина: {failure_detail}")
-    lines.extend(
-        [
-            "",
-            "Ответьте именно на это сообщение, например:",
-            "Левая: KP39-015",
-            "Правая: KP39-020",
-            "OEM левая: A6560900380",
-            "Источник: https://...",
-            "Комментарий: при необходимости",
-            "",
-            "Достаточно указать хотя бы одну турбину или OEM.",
-        ]
+    numbers = sorted(
+        {
+            number
+            for fitment in record.fitments
+            for number in (*fitment.oem_numbers, *fitment.turbo_numbers)
+        }
     )
+    if numbers:
+        lines.append(f"Автопоиск: {', '.join(numbers)}")
     return "\n".join(lines)
 
 

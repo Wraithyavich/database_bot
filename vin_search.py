@@ -165,8 +165,31 @@ def format_pending_vin(record: VinRecord, *, decoder_failed: bool = False) -> li
 
 
 def format_online_vin(record: VinRecord) -> list[str]:
+    return _format_compact_vin(
+        record,
+        title="✅ Результат поиска по VIN",
+        warning=(
+            "⚠️ Перед заказом сверьте номер на установленной турбине."
+        ),
+    )
+
+
+def format_manual_vin(record: VinRecord) -> list[str]:
+    return _format_compact_vin(
+        record,
+        title="✅ Результат ручной проверки",
+        warning="",
+    )
+
+
+def _format_compact_vin(
+    record: VinRecord,
+    *,
+    title: str,
+    warning: str,
+) -> list[str]:
     lines = [
-        "⚠️ ПРЕДВАРИТЕЛЬНЫЙ результат поиска в интернете",
+        title,
         f"VIN: {record.vin}",
     ]
 
@@ -185,11 +208,9 @@ def format_online_vin(record: VinRecord) -> list[str]:
     )
     if details:
         lines.append(f"Год / двигатель: {details}")
-    if record.online_search_provider:
-        lines.append(f"Поиск: {record.online_search_provider}")
 
     if record.fitments:
-        lines.extend(["", "Возможные номера турбокомпрессоров:"])
+        lines.append("")
         for fitment in record.fitments:
             lines.append(f"• {fitment.position}")
             if fitment.oem_numbers:
@@ -198,54 +219,14 @@ def format_online_vin(record: VinRecord) -> list[str]:
                 lines.append(f"  Turbo P/N: {', '.join(fitment.turbo_numbers)}")
             if fitment.articles:
                 lines.append(
-                    "  Точные совпадения в нашей базе: "
+                    "  Артикулы базы: "
                     f"{', '.join(fitment.articles)}"
                 )
-            if fitment.evidence:
-                lines.append(f"  Основание: {fitment.evidence}")
-
-        if not any(fitment.articles for fitment in record.fitments):
-            lines.extend(
-                [
-                    "",
-                    "В нашей базе точных совпадений по найденным номерам нет.",
-                ]
-            )
     else:
-        lines.extend(
-            [
-                "",
-                "Онлайн-поиск выполнен, но достаточно обоснованные номера "
-                "турбин не найдены.",
-            ]
-        )
+        lines.extend(["", "Номера турбины не найдены."])
 
-    if record.notes:
-        lines.extend(["", f"Комментарий поиска: {record.notes}"])
-
-    if record.sources:
-        lines.extend(["", "Источники:"])
-        for index, source in enumerate(record.sources, start=1):
-            lines.append(f"{index}. {source.label}: {source.url}")
-
-    lines.extend(
-        [
-            "",
-            "⚠️ ВАЖНО: результат сформирован автоматически по информации "
-            "из интернета. Номера могут быть неточными или относиться к другой "
-            "комплектации.",
-            "Перед заказом обязательно перепроверьте номер на шильдике "
-            "установленной турбины или в официальном каталоге по VIN.",
-        ]
-    )
-    if record.fitments:
-        lines.append("VIN сохранён в очереди на ручную проверку.")
-    else:
-        lines.append(
-            "Yandex не нашёл обоснованных OEM/Turbo P/N. "
-            "VIN передан агенту-наблюдателю для расширенного поиска "
-            "по доступным интернет-каталогам."
-        )
+    if warning:
+        lines.extend(["", warning])
     return lines
 
 

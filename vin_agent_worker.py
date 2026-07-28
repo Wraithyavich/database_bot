@@ -29,7 +29,7 @@ from vin_search import (
     format_online_vin,
     utc_now,
 )
-from vin_unresolved import UnresolvedVinStore
+from vin_unresolved import UnresolvedVinStore, VinResultSubscription
 
 
 logging.basicConfig(
@@ -42,7 +42,8 @@ BASE_DIR = Path(__file__).resolve().parent
 PART_NUMBER_PATTERN = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._/+\- ]{2,39}$")
 MODEL_PATTERN = re.compile(r"^[A-Za-z0-9._/-]{1,80}$")
 REASONING_EFFORTS = {"minimal", "low", "medium", "high", "xhigh", "max"}
-TELEGRAM_MESSAGE_LIMIT = 4000
+VIN_MANUAL_CALLBACK_PREFIX = "vin_review:"
+VIN_MANUAL_BUTTON_TEXT = "Запросить проверку"
 
 
 class VinAgentError(RuntimeError):
@@ -77,18 +78,6 @@ def parse_bounded_integer(
             f"{variable_name} must be between {minimum} and {maximum}"
         )
     return parsed
-
-
-def parse_admin_ids(value: str | None) -> tuple[int, ...]:
-    if not value:
-        return ()
-    result: set[int] = set()
-    for token in value.replace(",", " ").replace(";", " ").split():
-        user_id = int(token)
-        if user_id <= 0:
-            raise ValueError("VIN_ADMIN_USER_IDS must contain positive IDs")
-        result.add(user_id)
-    return tuple(sorted(result))
 
 
 def _bounded(value: Any, limit: int) -> str:
@@ -356,41 +345,8 @@ class CodexRunner:
                 raise VinAgentError("Codex returned invalid JSON") from error
 
 
-def split_message(text: str) -> tuple[str, ...]:
-    if len(text) <= TELEGRAM_MESSAGE_LIMIT:
-        return (text,)
-    chunks: list[str] = []
-    current = ""
-    for line in text.splitlines():
-        candidate = f"{current}\n{line}".strip() if current else line
-        if len(candidate) <= TELEGRAM_MESSAGE_LIMIT:
-            current = candidate
-            continue
-        if current:
-            chunks.append(current)
-        current = line
-    if current:
-        chunks.append(current)
-    return tuple(chunks)
-
-
 def format_candidate_notification(record: VinRecord) -> str:
-    lines = format_online_vin(record)
-    if lines:
-        lines[0] = "🤖 VIN-наблюдатель нашёл возможные номера"
-    lines = [
-        line
-        for line in lines
-        if line != "VIN сохранён в очереди на ручную проверку."
-    ]
-    lines.extend(
-        [
-            "",
-            "Если результат верный, ответьте на это сообщение: Подтверждаю",
-            "Для исправления отправьте строки с правильными OEM/Turbo P/N.",
-        ]
-    )
-    return "\n".join(lines)
+    return "\n".join(format_online_vin(record))
 
 
 def _document_checked_sources(document: dict[str, Any]) -> tuple[str, ...]:
@@ -435,64 +391,83 @@ def _vin_record_report(record: VinRecord) -> dict[str, Any]:
 
 
 class TelegramNotifier:
-    def __init__(self, token: str, admin_ids: tuple[int, ...], *, timeout: int = 15):
+    def __init__(self, token: str, *, timeout: int = 15):
         self.token = token.strip()
-        self.admin_ids = admin_ids
         self.timeout = timeout
 
     @property
     def enabled(self) -> bool:
-        return bool(self.token and self.admin_ids)
+        return bool(self.token)
 
-    def send(self, text: str) -> bool:
+    def send_result(
+        self,
+        subscription: VinResultSubscription,
+        *,
+        text: str,
+        vin: str,
+    ) -> bool:
         if not self.enabled:
             return False
-        delivered = False
-        for admin_id in self.admin_ids:
-            for chunk in split_message(text):
-                request = urllib.request.Request(
-                    f"https://api.telegram.org/bot{self.token}/sendMessage",
-                    data=urllib.parse.urlencode(
+        reply_markup = json.dumps(
+            {
+                "inline_keyboard": [
+                    [
                         {
-                            "chat_id": str(admin_id),
-                            "text": chunk,
-                            "disable_web_page_preview": "true",
+                            "text": VIN_MANUAL_BUTTON_TEXT,
+                            "callback_data": (
+                                f"{VIN_MANUAL_CALLBACK_PREFIX}{vin}"
+                            ),
                         }
-                    ).encode("utf-8"),
-                    headers={
-                        "Content-Type": "application/x-www-form-urlencoded",
-                        "User-Agent": "database-bot-vin-agent/1.0",
-                    },
-                    method="POST",
-                )
-                try:
-                    with urllib.request.urlopen(
-                        request,
-                        timeout=self.timeout,
-                    ) as response:
-                        payload = json.load(response)
-                except (
-                    OSError,
-                    urllib.error.URLError,
-                    json.JSONDecodeError,
-                ):
-                    logger.warning(
-                        "Не удалось отправить результат VIN-наблюдателя "
-                        "администратору %s",
-                        admin_id,
-                        exc_info=True,
-                    )
-                    break
-                if not isinstance(payload, dict) or not payload.get("ok"):
-                    logger.warning(
-                        "Telegram отклонил результат VIN-наблюдателя "
-                        "для администратора %s",
-                        admin_id,
-                    )
-                    break
-            else:
-                delivered = True
-        return delivered
+                    ]
+                ]
+            },
+            ensure_ascii=False,
+            separators=(",", ":"),
+        )
+        common = {
+            "chat_id": str(subscription.chat_id),
+            "text": text,
+            "reply_markup": reply_markup,
+            "disable_web_page_preview": "true",
+        }
+        if self._call(
+            "editMessageText",
+            {
+                **common,
+                "message_id": str(subscription.status_message_id),
+            },
+        ):
+            return True
+        return self._call("sendMessage", common)
+
+    def _call(self, method: str, values: dict[str, str]) -> bool:
+        request = urllib.request.Request(
+            f"https://api.telegram.org/bot{self.token}/{method}",
+            data=urllib.parse.urlencode(values).encode("utf-8"),
+            headers={
+                "Content-Type": "application/x-www-form-urlencoded",
+                "User-Agent": "database-bot-vin-agent/1.0",
+            },
+            method="POST",
+        )
+        try:
+            with urllib.request.urlopen(
+                request,
+                timeout=self.timeout,
+            ) as response:
+                payload = json.load(response)
+        except (
+            OSError,
+            urllib.error.URLError,
+            json.JSONDecodeError,
+        ):
+            logger.warning(
+                "Не удалось вызвать Telegram %s",
+                method,
+                exc_info=True,
+            )
+            return False
+        return isinstance(payload, dict) and bool(payload.get("ok"))
 
 
 class VinAgentService:
@@ -616,17 +591,12 @@ class VinAgentService:
                 result="codex_no_supported_turbo_numbers",
             )
             if self.notify_not_found:
-                checked = candidate.notes or "Обоснованные номера не найдены."
-                self.notifier.send(
-                    "\n".join(
-                        (
-                            "🔎 VIN-наблюдатель не нашёл номер турбины",
-                            f"VIN: {job.vin}",
-                            checked,
-                            "",
-                            "VIN останется в очереди для повторной проверки.",
-                        )
-                    )
+                self._deliver_to_subscribers(
+                    job.vin,
+                    (
+                        "Номера турбины по VIN не найдены.\n"
+                        f"VIN: {job.vin}"
+                    ),
                 )
             return "not_found"
         except (OSError, sqlite3.Error, RuntimeError, ValueError) as error:
@@ -660,8 +630,9 @@ class VinAgentService:
         source: str,
     ) -> str:
         candidate = self.vin_store.save_pending(candidate)
-        delivered = self.notifier.send(
-            format_candidate_notification(candidate)
+        delivered = self._deliver_to_subscribers(
+            vin,
+            format_candidate_notification(candidate),
         )
         if delivered:
             self.unresolved_store.remove(vin)
@@ -677,6 +648,22 @@ class VinAgentService:
             result="candidate_notification_failed",
         )
         return "notification_failed"
+
+    def _deliver_to_subscribers(self, vin: str, text: str) -> bool:
+        subscriptions = self.unresolved_store.pending_result_subscriptions(vin)
+        if not subscriptions:
+            return True
+        all_delivered = True
+        for subscription in subscriptions:
+            if not self.notifier.send_result(
+                subscription,
+                text=text,
+                vin=vin,
+            ):
+                all_delivered = False
+                continue
+            self.unresolved_store.mark_result_delivered(subscription.id)
+        return all_delivered
 
 
 class TriggerServer(HTTPServer):
@@ -798,7 +785,6 @@ def _service_from_environment() -> tuple[VinAgentService, int, int, str]:
         ),
         notifier=TelegramNotifier(
             os.environ.get("TELEGRAM_BOT_TOKEN", ""),
-            parse_admin_ids(os.environ.get("VIN_ADMIN_USER_IDS")),
         ),
         daily_limit=parse_bounded_integer(
             os.environ.get("VIN_AGENT_DAILY_LIMIT"),

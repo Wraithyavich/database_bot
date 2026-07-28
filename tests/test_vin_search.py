@@ -264,11 +264,12 @@ class VinFormattingTests(unittest.TestCase):
 
         message = "\n".join(format_online_vin(record))
 
-        self.assertIn("ПРЕДВАРИТЕЛЬНЫЙ", message)
+        self.assertIn("Результат поиска по VIN", message)
         self.assertIn("778400-0003", message)
         self.assertIn("GT17-092-1", message)
-        self.assertIn("могут быть неточными", message)
-        self.assertIn("https://example.test/fitment", message)
+        self.assertIn("сверьте номер", message)
+        self.assertNotIn("https://example.test/fitment", message)
+        self.assertNotIn("Основание", message)
 
 
 if __name__ == "__main__":

@@ -56,6 +56,29 @@ class VinObserverAttempt:
     report: Any
 
 
+@dataclass(frozen=True)
+class VinResultSubscription:
+    id: int
+    vin: str
+    user_id: int
+    chat_id: int
+    username: str
+    status_message_id: int
+    requested_at: str
+    delivered_at: str
+
+
+@dataclass(frozen=True)
+class VinManualRequest:
+    id: int
+    vin: str
+    user_id: int
+    chat_id: int
+    username: str
+    requested_at: str
+    completed_at: str
+
+
 class UnresolvedVinStore:
     """Persistent queue containing only VIN requests without a usable result."""
 
@@ -142,6 +165,36 @@ class UnresolvedVinStore:
 
                 CREATE INDEX IF NOT EXISTS idx_vin_observer_attempts_vin
                     ON vin_observer_attempts(vin, id DESC);
+
+                CREATE TABLE IF NOT EXISTS vin_result_subscriptions(
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    vin TEXT NOT NULL,
+                    user_id INTEGER NOT NULL,
+                    chat_id INTEGER NOT NULL,
+                    username TEXT NOT NULL,
+                    status_message_id INTEGER NOT NULL,
+                    requested_at TEXT NOT NULL,
+                    delivered_at TEXT NOT NULL DEFAULT '',
+                    UNIQUE(chat_id, status_message_id)
+                );
+
+                CREATE INDEX IF NOT EXISTS idx_vin_result_subscriptions_pending
+                    ON vin_result_subscriptions(vin, delivered_at, id);
+
+                CREATE TABLE IF NOT EXISTS vin_manual_requests(
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    vin TEXT NOT NULL,
+                    user_id INTEGER NOT NULL,
+                    chat_id INTEGER NOT NULL,
+                    username TEXT NOT NULL,
+                    requested_at TEXT NOT NULL,
+                    completed_at TEXT NOT NULL DEFAULT ''
+                );
+
+                CREATE UNIQUE INDEX IF NOT EXISTS
+                    idx_vin_manual_requests_pending
+                    ON vin_manual_requests(vin, user_id, chat_id)
+                    WHERE completed_at = '';
 
                 INSERT OR IGNORE INTO vin_observer_jobs(
                     vin, next_attempt_at
@@ -375,6 +428,200 @@ class UnresolvedVinStore:
                 (admin_chat_id, message_id),
             ).fetchone()
         return str(row["vin"]) if row is not None else None
+
+    def subscribe_result(
+        self,
+        vin: str,
+        *,
+        user_id: int,
+        chat_id: int,
+        username: str = "",
+        status_message_id: int,
+    ) -> VinResultSubscription:
+        normalized = extract_vin(vin)
+        if normalized is None:
+            raise ValueError("Invalid VIN")
+        _validate_telegram_target(
+            user_id=user_id,
+            chat_id=chat_id,
+            message_id=status_message_id,
+        )
+        cleaned_username = username.strip().lstrip("@")[:64]
+        with closing(self._connect()) as connection:
+            connection.execute(
+                """
+                INSERT OR IGNORE INTO vin_result_subscriptions(
+                    vin,
+                    user_id,
+                    chat_id,
+                    username,
+                    status_message_id,
+                    requested_at
+                )
+                VALUES (?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    normalized,
+                    user_id,
+                    chat_id,
+                    cleaned_username,
+                    status_message_id,
+                    utc_now(),
+                ),
+            )
+            row = connection.execute(
+                """
+                SELECT *
+                FROM vin_result_subscriptions
+                WHERE chat_id = ? AND status_message_id = ?
+                """,
+                (chat_id, status_message_id),
+            ).fetchone()
+            connection.commit()
+        if row is None:
+            raise RuntimeError("Failed to persist VIN result subscription")
+        return _result_subscription_from_row(row)
+
+    def pending_result_subscriptions(
+        self,
+        vin: str,
+        *,
+        limit: int = 100,
+    ) -> tuple[VinResultSubscription, ...]:
+        normalized = extract_vin(vin)
+        if normalized is None:
+            raise ValueError("Invalid VIN")
+        if limit < 1:
+            raise ValueError("limit must be positive")
+        with closing(self._connect()) as connection:
+            rows = connection.execute(
+                """
+                SELECT *
+                FROM vin_result_subscriptions
+                WHERE vin = ? AND delivered_at = ''
+                ORDER BY id
+                LIMIT ?
+                """,
+                (normalized, limit),
+            ).fetchall()
+        return tuple(_result_subscription_from_row(row) for row in rows)
+
+    def mark_result_delivered(self, subscription_id: int) -> None:
+        if subscription_id <= 0:
+            raise ValueError("subscription_id must be positive")
+        with closing(self._connect()) as connection:
+            cursor = connection.execute(
+                """
+                UPDATE vin_result_subscriptions
+                SET delivered_at = ?
+                WHERE id = ? AND delivered_at = ''
+                """,
+                (utc_now(), subscription_id),
+            )
+            connection.commit()
+        if cursor.rowcount != 1:
+            raise RuntimeError("VIN result subscription is not pending")
+
+    def claim_manual_request(
+        self,
+        vin: str,
+        *,
+        user_id: int,
+        chat_id: int,
+        username: str = "",
+    ) -> VinManualRequest | None:
+        normalized = extract_vin(vin)
+        if normalized is None:
+            raise ValueError("Invalid VIN")
+        _validate_telegram_target(
+            user_id=user_id,
+            chat_id=chat_id,
+        )
+        cleaned_username = username.strip().lstrip("@")[:64]
+        with closing(self._connect()) as connection:
+            cursor = connection.execute(
+                """
+                INSERT OR IGNORE INTO vin_manual_requests(
+                    vin,
+                    user_id,
+                    chat_id,
+                    username,
+                    requested_at
+                )
+                VALUES (?, ?, ?, ?, ?)
+                """,
+                (
+                    normalized,
+                    user_id,
+                    chat_id,
+                    cleaned_username,
+                    utc_now(),
+                ),
+            )
+            row = (
+                connection.execute(
+                    "SELECT * FROM vin_manual_requests WHERE id = ?",
+                    (int(cursor.lastrowid),),
+                ).fetchone()
+                if cursor.rowcount == 1
+                else None
+            )
+            connection.commit()
+        return _manual_request_from_row(row) if row is not None else None
+
+    def release_manual_request(self, request_id: int) -> bool:
+        if request_id <= 0:
+            raise ValueError("request_id must be positive")
+        with closing(self._connect()) as connection:
+            cursor = connection.execute(
+                """
+                DELETE FROM vin_manual_requests
+                WHERE id = ? AND completed_at = ''
+                """,
+                (request_id,),
+            )
+            connection.commit()
+        return cursor.rowcount > 0
+
+    def pending_manual_requests(
+        self,
+        vin: str,
+        *,
+        limit: int = 100,
+    ) -> tuple[VinManualRequest, ...]:
+        normalized = extract_vin(vin)
+        if normalized is None:
+            raise ValueError("Invalid VIN")
+        if limit < 1:
+            raise ValueError("limit must be positive")
+        with closing(self._connect()) as connection:
+            rows = connection.execute(
+                """
+                SELECT *
+                FROM vin_manual_requests
+                WHERE vin = ? AND completed_at = ''
+                ORDER BY id
+                LIMIT ?
+                """,
+                (normalized, limit),
+            ).fetchall()
+        return tuple(_manual_request_from_row(row) for row in rows)
+
+    def mark_manual_request_completed(self, request_id: int) -> None:
+        if request_id <= 0:
+            raise ValueError("request_id must be positive")
+        with closing(self._connect()) as connection:
+            cursor = connection.execute(
+                """
+                UPDATE vin_manual_requests
+                SET completed_at = ?
+                WHERE id = ? AND completed_at = ''
+                """,
+                (utc_now(), request_id),
+            )
+            connection.commit()
+        if cursor.rowcount != 1:
+            raise RuntimeError("VIN manual request is not pending")
 
     def claim_due_observer_job(
         self,
@@ -689,6 +936,45 @@ def _observer_attempt_from_row(row: sqlite3.Row) -> VinObserverAttempt:
         checked_sources=checked_sources,
         report=report,
     )
+
+
+def _result_subscription_from_row(
+    row: sqlite3.Row,
+) -> VinResultSubscription:
+    return VinResultSubscription(
+        id=int(row["id"]),
+        vin=row["vin"],
+        user_id=int(row["user_id"]),
+        chat_id=int(row["chat_id"]),
+        username=row["username"],
+        status_message_id=int(row["status_message_id"]),
+        requested_at=row["requested_at"],
+        delivered_at=row["delivered_at"],
+    )
+
+
+def _manual_request_from_row(row: sqlite3.Row) -> VinManualRequest:
+    return VinManualRequest(
+        id=int(row["id"]),
+        vin=row["vin"],
+        user_id=int(row["user_id"]),
+        chat_id=int(row["chat_id"]),
+        username=row["username"],
+        requested_at=row["requested_at"],
+        completed_at=row["completed_at"],
+    )
+
+
+def _validate_telegram_target(
+    *,
+    user_id: int,
+    chat_id: int,
+    message_id: int | None = None,
+) -> None:
+    if user_id <= 0 or chat_id == 0:
+        raise ValueError("Invalid Telegram target")
+    if message_id is not None and message_id <= 0:
+        raise ValueError("Invalid Telegram message ID")
 
 
 def _bounded_json(value: Any, *, max_length: int) -> str:

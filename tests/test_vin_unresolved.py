@@ -182,6 +182,59 @@ class UnresolvedVinStoreTests(unittest.TestCase):
         self.assertEqual(attempts[0].status, "not_found")
         self.assertEqual(attempts[0].report["vehicle_candidates"], 1)
 
+    def test_result_subscription_tracks_delivery_after_queue_removal(self) -> None:
+        self.store.record_failure(
+            UNKNOWN_VIN,
+            failure_code="no_supported_turbo_numbers",
+        )
+        subscription = self.store.subscribe_result(
+            UNKNOWN_VIN,
+            user_id=456,
+            chat_id=456,
+            username="requester",
+            status_message_id=1001,
+        )
+
+        self.store.remove(UNKNOWN_VIN)
+        self.assertEqual(
+            self.store.pending_result_subscriptions(UNKNOWN_VIN),
+            (subscription,),
+        )
+
+        self.store.mark_result_delivered(subscription.id)
+        self.assertEqual(
+            self.store.pending_result_subscriptions(UNKNOWN_VIN),
+            (),
+        )
+
+    def test_manual_request_is_deduplicated_until_completed(self) -> None:
+        request = self.store.claim_manual_request(
+            UNKNOWN_VIN,
+            user_id=456,
+            chat_id=456,
+            username="requester",
+        )
+
+        self.assertIsNotNone(request)
+        self.assertIsNone(
+            self.store.claim_manual_request(
+                UNKNOWN_VIN,
+                user_id=456,
+                chat_id=456,
+                username="requester",
+            )
+        )
+        self.assertEqual(
+            self.store.pending_manual_requests(UNKNOWN_VIN),
+            (request,),
+        )
+
+        self.store.mark_manual_request_completed(request.id)
+        self.assertEqual(
+            self.store.pending_manual_requests(UNKNOWN_VIN),
+            (),
+        )
+
     def test_exports_anonymous_csv_sample(self) -> None:
         self.store.record_failure(
             UNKNOWN_VIN,
