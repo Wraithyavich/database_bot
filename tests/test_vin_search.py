@@ -216,7 +216,7 @@ class NhtsaVinDecoderTests(unittest.TestCase):
 
 
 class VinFormattingTests(unittest.TestCase):
-    def test_formats_verified_result_with_articles_and_sources(self) -> None:
+    def test_formats_verified_result_compactly(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
             store = VinStore(Path(temp_dir) / "vin.sqlite")
             store.initialize(seed_path=VIN_SEED_PATH)
@@ -227,7 +227,8 @@ class VinFormattingTests(unittest.TestCase):
         self.assertIn("Проверенный результат", message)
         self.assertIn("GT17-092-1", message)
         self.assertIn("GT14-009", message)
-        self.assertIn("Jaguar Land Rover", message)
+        self.assertNotIn("Jaguar Land Rover", message)
+        self.assertNotIn("Источники:", message)
 
     def test_formats_pending_result_without_part_numbers(self) -> None:
         record = VinRecord(

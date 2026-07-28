@@ -82,50 +82,13 @@ def extract_vin(value: str) -> str | None:
 
 
 def format_verified_vin(record: VinRecord) -> list[str]:
-    vehicle_parts = [part for part in (record.make, record.model) if part]
-    vehicle = " ".join(vehicle_parts) or "не определён"
-    details = " / ".join(
-        part
-        for part in (
-            record.model_year,
-            record.engine,
-            f"{record.power_kw} кВт" if record.power_kw else "",
-        )
-        if part
+    return _format_compact_vin(
+        record,
+        title="✅ Проверенный результат по VIN",
+        warning=(
+            "⚠️ Перед заказом сверьте номер на установленной турбине."
+        ),
     )
-
-    lines = [
-        "✅ Проверенный результат по VIN",
-        f"VIN: {record.vin}",
-        f"Автомобиль: {vehicle}",
-    ]
-    if details:
-        lines.append(f"Год / двигатель: {details}")
-
-    lines.extend(["", "Турбокомпрессоры и картриджи:"])
-    for fitment in record.fitments:
-        lines.append(f"• {fitment.position}")
-        if fitment.oem_numbers:
-            lines.append(f"  OEM: {', '.join(fitment.oem_numbers)}")
-        if fitment.turbo_numbers:
-            lines.append(f"  Turbo P/N: {', '.join(fitment.turbo_numbers)}")
-        if fitment.articles:
-            lines.append(
-                f"  Артикулы в нашей базе: {', '.join(fitment.articles)}"
-            )
-
-    if record.sources:
-        lines.extend(["", "Источники:"])
-        for index, source in enumerate(record.sources, start=1):
-            lines.append(f"{index}. {source.label}: {source.url}")
-
-    lines.extend(
-        [
-            "",
-            "⚠️ Перед заказом рекомендуется сверить номер на установленной турбине.",
-        ]
-    )
-    return lines
 
 
 def format_pending_vin(record: VinRecord, *, decoder_failed: bool = False) -> list[str]:
