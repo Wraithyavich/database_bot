@@ -225,8 +225,8 @@ class VinFormattingTests(unittest.TestCase):
         self.assertIsNotNone(record)
         message = "\n".join(format_verified_vin(record))
         self.assertIn("Проверенный результат", message)
-        self.assertIn("GT17-092-1", message)
-        self.assertIn("GT14-009", message)
+        self.assertIn("<code>GT17-092-1</code>", message)
+        self.assertIn("<code>GT14-009</code>", message)
         self.assertNotIn("Jaguar Land Rover", message)
         self.assertNotIn("Источники:", message)
 
@@ -267,7 +267,7 @@ class VinFormattingTests(unittest.TestCase):
 
         self.assertIn("Результат поиска по VIN", message)
         self.assertIn("778400-0003", message)
-        self.assertIn("GT17-092-1", message)
+        self.assertIn("<code>GT17-092-1</code>", message)
         self.assertIn("сверьте номер", message)
         self.assertNotIn("https://example.test/fitment", message)
         self.assertNotIn("Основание", message)

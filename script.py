@@ -1,4 +1,5 @@
 import asyncio
+import html
 import json
 import logging
 import os
@@ -324,8 +325,12 @@ def clean_text(value: str) -> str:
     return " ".join(value.split())
 
 
+def telegram_code(value: str) -> str:
+    return f"<code>{html.escape(value, quote=False)}</code>"
+
+
 def format_search_result(result: SearchResult) -> list[str]:
-    query = clean_text(result.original_query)
+    query = html.escape(clean_text(result.original_query), quote=False)
     if not result.normalized_query:
         return ["❌ Введите номер или артикул, содержащий буквы или цифры."]
 
@@ -335,7 +340,8 @@ def format_search_result(result: SearchResult) -> list[str]:
     if result.fallback_used:
         heading = (
             f"🔎 По запросу {query} ничего не найдено. "
-            f"Использован вариант {result.matched_query}:"
+            f"Использован вариант "
+            f"{html.escape(result.matched_query, quote=False)}:"
         )
     elif result.exact:
         heading = f"🔎 Найденные артикулы для {query}:"
@@ -348,11 +354,15 @@ def format_search_result(result: SearchResult) -> list[str]:
             category for category in match.categories if category != "Прочее"
         ]
         category_suffix = (
-            f" — {', '.join(meaningful_categories)}"
+            " — "
+            + ", ".join(
+                html.escape(category, quote=False)
+                for category in meaningful_categories
+            )
             if meaningful_categories
             else ""
         )
-        lines.append(f"• {match.article}{category_suffix}")
+        lines.append(f"• {telegram_code(match.article)}{category_suffix}")
 
     if result.truncated:
         lines.extend(
@@ -388,9 +398,12 @@ def format_image_search_results(
         if number_key not in seen_numbers:
             seen_numbers.add(number_key)
             if normalize_number(recognized) == normalize_number(searched):
-                lines.append(f"• {recognized}")
+                lines.append(f"• {html.escape(recognized, quote=False)}")
             else:
-                lines.append(f"• {recognized} → {searched}")
+                lines.append(
+                    f"• {html.escape(recognized, quote=False)} → "
+                    f"{html.escape(searched, quote=False)}"
+                )
 
         for article_match in image_match.result.matches:
             meaningful_categories = {
@@ -406,9 +419,15 @@ def format_image_search_results(
     lines.extend(["", "🔎 Найденные артикулы:"])
     for article, categories in articles.items():
         category_suffix = (
-            f" — {', '.join(sorted(categories))}" if categories else ""
+            " — "
+            + ", ".join(
+                html.escape(category, quote=False)
+                for category in sorted(categories)
+            )
+            if categories
+            else ""
         )
-        lines.append(f"• {article}{category_suffix}")
+        lines.append(f"• {telegram_code(article)}{category_suffix}")
 
     if truncated:
         lines.append(f"Показаны первые {DEFAULT_RESULT_LIMIT} результатов.")
@@ -488,6 +507,7 @@ async def send_automatic_vin_result(
 ) -> None:
     await message.reply_text(
         "\n".join(format_online_vin(record)),
+        parse_mode="HTML",
         reply_markup=vin_manual_review_markup(record.vin),
     )
 
@@ -511,7 +531,7 @@ async def handle_vin_query(
         if record is not None and record.status == "verified":
             await update_unresolved_vin(record)
             for chunk in split_long_message(format_verified_vin(record)):
-                await message.reply_text(chunk)
+                await message.reply_text(chunk, parse_mode="HTML")
             return
 
         online_search_note = ""
@@ -573,7 +593,7 @@ async def handle_vin_query(
         if record.status == "verified":
             await update_unresolved_vin(record)
             for chunk in split_long_message(format_verified_vin(record)):
-                await message.reply_text(chunk)
+                await message.reply_text(chunk, parse_mode="HTML")
             return
 
         if record.fitments:
@@ -765,6 +785,7 @@ async def deliver_subscribed_vin_result(
                 chat_id=subscription.chat_id,
                 message_id=subscription.status_message_id,
                 text=text,
+                parse_mode="HTML",
                 reply_markup=reply_markup,
             )
         except TelegramError:
@@ -772,6 +793,7 @@ async def deliver_subscribed_vin_result(
                 await bot.send_message(
                     chat_id=subscription.chat_id,
                     text=text,
+                    parse_mode="HTML",
                     reply_markup=reply_markup,
                 )
             except TelegramError:
@@ -882,6 +904,7 @@ async def deliver_manual_vin_result(
             await bot.send_message(
                 chat_id=request.chat_id,
                 text=text,
+                parse_mode="HTML",
             )
         except TelegramError:
             logger.warning(
@@ -1260,7 +1283,7 @@ async def _handle_message_request(
         return
 
     for chunk in split_long_message(format_search_result(result)):
-        await update.message.reply_text(chunk)
+        await update.message.reply_text(chunk, parse_mode="HTML")
 
 
 async def handle_message(
@@ -1392,7 +1415,7 @@ async def _handle_image_request(
         lines = format_image_search_results(matches)
 
     for chunk in split_long_message(lines):
-        await message.reply_text(chunk)
+        await message.reply_text(chunk, parse_mode="HTML")
 
 
 async def handle_image(

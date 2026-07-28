@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import html
 import json
 import re
 import sqlite3
@@ -153,19 +154,26 @@ def _format_compact_vin(
 ) -> list[str]:
     lines = [
         title,
-        f"VIN: {record.vin}",
+        f"VIN: {html.escape(record.vin, quote=False)}",
     ]
 
     vehicle_parts = [part for part in (record.make, record.model) if part]
     if vehicle_parts:
-        lines.append(f"Автомобиль: {' '.join(vehicle_parts)}")
+        vehicle = " ".join(
+            html.escape(part, quote=False) for part in vehicle_parts
+        )
+        lines.append(f"Автомобиль: {vehicle}")
 
     details = " / ".join(
         part
         for part in (
-            record.model_year,
-            record.engine,
-            f"{record.power_kw} кВт" if record.power_kw else "",
+            html.escape(record.model_year, quote=False),
+            html.escape(record.engine, quote=False),
+            (
+                f"{html.escape(record.power_kw, quote=False)} кВт"
+                if record.power_kw
+                else ""
+            ),
         )
         if part
     )
@@ -175,15 +183,30 @@ def _format_compact_vin(
     if record.fitments:
         lines.append("")
         for fitment in record.fitments:
-            lines.append(f"• {fitment.position}")
+            lines.append(f"• {html.escape(fitment.position, quote=False)}")
             if fitment.oem_numbers:
-                lines.append(f"  OEM: {', '.join(fitment.oem_numbers)}")
+                lines.append(
+                    "  OEM: "
+                    + ", ".join(
+                        html.escape(number, quote=False)
+                        for number in fitment.oem_numbers
+                    )
+                )
             if fitment.turbo_numbers:
-                lines.append(f"  Turbo P/N: {', '.join(fitment.turbo_numbers)}")
+                lines.append(
+                    "  Turbo P/N: "
+                    + ", ".join(
+                        html.escape(number, quote=False)
+                        for number in fitment.turbo_numbers
+                    )
+                )
             if fitment.articles:
                 lines.append(
                     "  Артикулы базы: "
-                    f"{', '.join(fitment.articles)}"
+                    + ", ".join(
+                        f"<code>{html.escape(article, quote=False)}</code>"
+                        for article in fitment.articles
+                    )
                 )
     else:
         lines.extend(["", "Номера турбины не найдены."])

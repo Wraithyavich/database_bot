@@ -182,6 +182,7 @@ class TelegramNotifierTests(unittest.TestCase):
         self.assertTrue(delivered)
         self.assertTrue(captured["url"].endswith("/editMessageText"))
         self.assertEqual(captured["data"]["message_id"], ["1001"])
+        self.assertEqual(captured["data"]["parse_mode"], ["HTML"])
         self.assertIn(
             f"vin_review:{VIN}",
             captured["data"]["reply_markup"][0],

@@ -427,6 +427,7 @@ class TelegramNotifier:
         common = {
             "chat_id": str(subscription.chat_id),
             "text": text,
+            "parse_mode": "HTML",
             "reply_markup": reply_markup,
             "disable_web_page_preview": "true",
         }
