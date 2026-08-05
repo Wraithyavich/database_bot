@@ -36,6 +36,7 @@ from request_limits import (
 from turbo_database import (
     DEFAULT_RESULT_LIMIT,
     MIN_PARTIAL_SEARCH_LENGTH,
+    ReverseSearchResult,
     SearchResult,
     TurboDatabase,
     ensure_sqlite_database,
@@ -377,6 +378,67 @@ def format_search_result(result: SearchResult) -> list[str]:
     return lines
 
 
+def format_reverse_search_result(result: ReverseSearchResult) -> list[str]:
+    if not result.found:
+        lines = ["🔎 Найдено несколько возможных артикулов. Уточните запрос:"]
+        lines.extend(f"• {telegram_code(article)}" for article in result.candidates)
+        return lines
+
+    assert result.matched_article is not None
+    requested = clean_text(result.original_query)
+    if result.resolution == "exact":
+        lines = [f"🔎 Артикул: {telegram_code(result.matched_article)}"]
+    else:
+        lines = [
+            f"🔎 Запрос: {telegram_code(requested)}",
+            f"Найденный артикул: {telegram_code(result.matched_article)}",
+        ]
+
+    meaningful_categories = tuple(
+        category for category in result.categories if category != "Прочее"
+    )
+    if meaningful_categories:
+        lines.append(
+            "Тип: "
+            + ", ".join(
+                html.escape(category, quote=False)
+                for category in meaningful_categories
+            )
+        )
+
+    groups = (
+        ("turbo_pn", "Turbo P/N"),
+        ("vehicle_oem", "OEM / Vehicle OE"),
+        ("component_pn", "OEM/P/N детали"),
+    )
+    visible_count = 0
+    for kind, heading in groups:
+        numbers = result.numbers_of_kind(kind)
+        if not numbers:
+            continue
+        visible_count += len(numbers)
+        lines.extend(["", f"{heading} — {len(numbers)}:"])
+        lines.extend(telegram_code(number.number) for number in numbers)
+
+    if not result.numbers_of_kind("turbo_pn") and not result.numbers_of_kind(
+        "vehicle_oem"
+    ):
+        lines.extend(
+            [
+                "",
+                (
+                    "Артикул найден, но в текущей базе для него не указаны "
+                    "Turbo P/N или OEM-номера."
+                ),
+            ]
+        )
+    elif visible_count == 0:
+        lines.append(
+            "Артикул найден, но в текущей базе нет достоверных обратных связей."
+        )
+    return lines
+
+
 def format_image_search_results(
     matches: tuple[ImageSearchMatch, ...],
 ) -> list[str]:
@@ -435,19 +497,26 @@ def format_image_search_results(
 
 
 def split_long_message(
-    lines: list[str], *, limit: int = TELEGRAM_MESSAGE_LIMIT
+    lines: list[str],
+    *,
+    limit: int = TELEGRAM_MESSAGE_LIMIT,
+    number_parts: bool = False,
 ) -> list[str]:
+    if limit < 16:
+        raise ValueError("limit должен быть не меньше 16")
+
+    content_limit = limit - 16 if number_parts else limit
     chunks: list[str] = []
     current: list[str] = []
     current_length = 0
 
     for original_line in lines:
         line = original_line
-        if len(line) > limit:
-            line = f"{line[: limit - 1]}…"
+        if len(line) > content_limit:
+            line = f"{line[: content_limit - 1]}…"
 
         added_length = len(line) + (1 if current else 0)
-        if current and current_length + added_length > limit:
+        if current and current_length + added_length > content_limit:
             chunks.append("\n".join(current))
             current = [line]
             current_length = len(line)
@@ -457,6 +526,9 @@ def split_long_message(
 
     if current:
         chunks.append("\n".join(current))
+    if number_parts and len(chunks) > 1:
+        total = len(chunks)
+        chunks = [f"{index}/{total}\n{chunk}" for index, chunk in enumerate(chunks, 1)]
     return chunks
 
 
@@ -468,8 +540,10 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     welcome_text = (
         f'<tg-emoji emoji-id="{emoji_id}">😊</tg-emoji> '
         "ТУРБОНАЙЗЕР бот приветствует!\n"
-        "Введите E&E P/N, Turbo P/N, OEM, JRONE или FLP номер.\n\n"
-        "Пример: 17201-52010 или 1000-010-006\n\n"
+        "Отправьте Turbo P/N, OEM-номер или артикул E&E Turbo.\n\n"
+        "Прямой поиск: 17201-52010\n"
+        "Обратный поиск: Turbo-G189\n\n"
+        "Также поддерживаются JRONE и FLP номера.\n\n"
         "Можно отправить 17-значный VIN: бот проверит базу и при необходимости "
         "выполнит предварительный поиск в интернете.\n\n"
         "Также можно отправить фотографию шильдика или номера.\n\n"
@@ -1274,14 +1348,46 @@ async def _handle_message_request(
         return
 
     try:
-        result = await asyncio.to_thread(DATABASE.search, user_input)
+        reverse_result = await asyncio.to_thread(
+            DATABASE.reverse_search, user_input
+        )
     except (OSError, sqlite3.Error, RuntimeError):
-        logger.exception("Ошибка поиска в SQLite")
+        logger.exception("Ошибка обратного поиска в SQLite")
         await update.message.reply_text(
             "❌ База данных временно недоступна. Попробуйте ещё раз позже."
         )
         return
 
+    if reverse_result is not None:
+        logger.info(
+            "Режим поиска=reverse normalized=%s resolution=%s results=%s",
+            reverse_result.normalized_query,
+            reverse_result.resolution,
+            len(reverse_result.numbers)
+            if reverse_result.found
+            else len(reverse_result.candidates),
+        )
+        for chunk in split_long_message(
+            format_reverse_search_result(reverse_result),
+            number_parts=True,
+        ):
+            await update.message.reply_text(chunk, parse_mode="HTML")
+        return
+
+    try:
+        result = await asyncio.to_thread(DATABASE.search, user_input)
+    except (OSError, sqlite3.Error, RuntimeError):
+        logger.exception("Ошибка прямого поиска в SQLite")
+        await update.message.reply_text(
+            "❌ База данных временно недоступна. Попробуйте ещё раз позже."
+        )
+        return
+
+    logger.info(
+        "Режим поиска=direct normalized=%s results=%s",
+        result.normalized_query,
+        len(result.matches),
+    )
     for chunk in split_long_message(format_search_result(result)):
         await update.message.reply_text(chunk, parse_mode="HTML")
 
@@ -1466,9 +1572,13 @@ def main() -> None:
 
     stats = DATABASE.validate()
     logger.info(
-        "SQLite загружена: %s артикулов, %s номеров, %s кроссов, %s источников",
+        (
+            "SQLite загружена: %s артикулов, %s номеров прямого поиска, "
+            "%s обратных связей, %s кроссов, %s источников"
+        ),
         stats.parts,
         stats.numbers,
+        stats.reverse_numbers,
         stats.crossrefs,
         stats.sources,
     )
