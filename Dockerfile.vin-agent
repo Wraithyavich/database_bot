@@ -29,6 +29,7 @@ COPY --chown=observer:observer \
     vin_online_search.py \
     vin_search.py \
     vin_unresolved.py \
+    reverse_search.py \
     turbo_database.py \
     turbo_search.sqlite \
     ./
