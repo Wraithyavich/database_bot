@@ -115,7 +115,7 @@ class VinMessageRoutingTests(unittest.TestCase):
                     ),
                 ),
                 online_search_at="2026-07-26T00:00:00+00:00",
-                online_search_provider="Gemini + Google Search",
+                online_search_provider="Yandex Search API + Alice AI (Emex)",
             )
             searcher = SimpleNamespace(
                 enabled=True,
@@ -852,9 +852,9 @@ class VinAllowlistParsingTests(unittest.TestCase):
 
 class ProductionVinProviderTests(unittest.TestCase):
     def test_uses_only_yandex_emex_searcher(self) -> None:
-        self.assertEqual(
-            script.VIN_ONLINE_SEARCHER.searchers,
-            (script.YANDEX_VIN_SEARCHER,),
+        self.assertIs(
+            script.VIN_ONLINE_SEARCHER,
+            script.YANDEX_VIN_SEARCHER,
         )
         self.assertIn("Emex", script.YANDEX_VIN_SEARCHER.provider_name)
 

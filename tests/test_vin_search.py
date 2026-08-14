@@ -164,7 +164,7 @@ class VinStoreTests(unittest.TestCase):
                 ),
             ),
             online_search_at="2026-07-26T00:00:00+00:00",
-            online_search_provider="Gemini + Google Search",
+            online_search_provider="Yandex Search API + Alice AI (Emex)",
         )
 
         self.store.record_request(unknown_vin, decoded=preliminary)

@@ -64,7 +64,6 @@ from vin_unresolved import UnresolvedVinStore
 from vin_online_search import (
     DEFAULT_YANDEX_MODEL,
     VinOnlineSearchError,
-    VinOnlineSearcherRouter,
     YandexVinSearcher,
     attach_catalog_articles,
 )
@@ -216,9 +215,7 @@ YANDEX_VIN_SEARCHER = YandexVinSearcher(
     ),
     model=os.environ.get("YANDEX_MODEL", DEFAULT_YANDEX_MODEL),
 )
-VIN_ONLINE_SEARCHER = VinOnlineSearcherRouter(
-    YANDEX_VIN_SEARCHER,
-)
+VIN_ONLINE_SEARCHER = YANDEX_VIN_SEARCHER
 VIN_ALLOWED_USER_IDS = parse_allowed_user_ids(
     os.environ.get("VIN_ALLOWED_USER_IDS")
 )
@@ -1601,7 +1598,7 @@ def main() -> None:
         if VIN_ONLINE_SEARCHER.enabled:
             logger.info(
                 "Онлайн-поиск VIN включён: %s",
-                VIN_ONLINE_SEARCHER.description,
+                VIN_ONLINE_SEARCHER.provider_name,
             )
         else:
             logger.warning(
