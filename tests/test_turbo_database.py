@@ -89,10 +89,45 @@ class TurboDatabaseIntegrationTests(unittest.TestCase):
         self.assertIn(expected_article, articles)
 
     def test_database_has_expected_content(self) -> None:
-        self.assertEqual(self.stats.parts, 38401)
-        self.assertEqual(self.stats.numbers, 345396)
+        self.assertEqual(self.stats.parts, 35067)
+        self.assertEqual(self.stats.numbers, 249954)
         self.assertEqual(self.stats.crossrefs, 0)
-        self.assertEqual(self.stats.sources, 16)
+        self.assertEqual(self.stats.sources, 1)
+
+    def test_service_catalog_exact_number_has_priority(self) -> None:
+        result = self.database.search("760700")
+
+        self.assertTrue(result.exact)
+        self.assertEqual(
+            [match.article for match in result.matches],
+            ["BP-GT021-1"],
+        )
+
+    def test_service_catalog_text_search_includes_related_variants(self) -> None:
+        result = self.database.search("760700", include_related=True)
+
+        self.assertTrue(result.exact)
+        self.assertEqual(result.matches[0].article, "BP-GT021-1")
+        self.assertEqual(
+            {match.article for match in result.matches},
+            {
+                "AC-G271",
+                "BH-G20-9-1",
+                "BP-GT021-1",
+                "CH-G185",
+                "CW-0413",
+                "GK-0174",
+                "GT17-066",
+                "JBS-003",
+                "JBS-019",
+                "NR-N037",
+                "NR-N042-1B",
+                "RR-J66",
+                "TH-G180",
+                "Turbo-G140",
+                "TW-0366",
+            },
+        )
 
     def test_turbo_number_search(self) -> None:
         self.assert_search_contains("17201-52010", "AC-T034e")

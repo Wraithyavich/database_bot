@@ -1372,7 +1372,11 @@ async def _handle_message_request(
         return
 
     try:
-        result = await asyncio.to_thread(DATABASE.search, user_input)
+        result = await asyncio.to_thread(
+            DATABASE.search,
+            user_input,
+            include_related=True,
+        )
     except (OSError, sqlite3.Error, RuntimeError):
         logger.exception("Ошибка прямого поиска в SQLite")
         await update.message.reply_text(

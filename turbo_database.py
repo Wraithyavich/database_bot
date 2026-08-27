@@ -506,6 +506,7 @@ class TurboDatabase:
         min_partial_length: int = MIN_PARTIAL_SEARCH_LENGTH,
         allow_partial: bool = True,
         allow_fallback: bool = True,
+        include_related: bool = False,
     ) -> SearchResult:
         if limit < 1:
             raise ValueError("limit должен быть больше нуля")
@@ -526,6 +527,32 @@ class TurboDatabase:
                 connection, normalized, exact=True, limit=limit
             )
             if matches:
+                if (
+                    include_related
+                    and allow_partial
+                    and len(normalized) >= min_partial_length
+                    and not truncated
+                    and len(matches) < limit
+                ):
+                    partial_matches, partial_truncated = self._find_articles(
+                        connection,
+                        normalized,
+                        exact=False,
+                        limit=limit + len(matches),
+                    )
+                    exact_articles = {
+                        match.article.casefold() for match in matches
+                    }
+                    related_matches = tuple(
+                        match
+                        for match in partial_matches
+                        if match.article.casefold() not in exact_articles
+                    )
+                    combined_matches = matches + related_matches
+                    truncated = (
+                        partial_truncated or len(combined_matches) > limit
+                    )
+                    matches = combined_matches[:limit]
                 return SearchResult(
                     original_query=query,
                     normalized_query=normalized,

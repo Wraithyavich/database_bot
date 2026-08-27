@@ -277,7 +277,7 @@ class VinAgentServiceTests(unittest.TestCase):
             self.assertIsNotNone(pending)
             self.assertEqual(
                 pending.fitments[0].articles,
-                ("AC-I085", "AC-I085-1e", "RHF5-031BR"),
+                ("AC-I085-1e", "RHF5-031BR"),
             )
             self.assertIn("06L145874E", notifier.messages[0])
             self.assertEqual(unresolved.list(), ())

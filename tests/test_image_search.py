@@ -133,7 +133,7 @@ class ImageDatabaseSearchTests(unittest.TestCase):
             for image_match in matches
             for article in image_match.result.matches
         }
-        self.assertIn("AC-G150", articles)
+        self.assertIn("AC-G150eh", articles)
         self.assertFalse(matches[0].result.exact)
 
     def test_rejects_noisy_mass_partial_match(self) -> None:

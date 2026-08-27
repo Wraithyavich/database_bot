@@ -400,6 +400,10 @@ class RealDatabaseReverseSmokeTests(unittest.TestCase):
         result = self.database.reverse_search("Turbo-G189")
         self.assertEqual(
             [number.number for number in result.numbers_of_kind("turbo_pn")],
+            [],
+        )
+        self.assertEqual(
+            [number.number for number in result.numbers_of_kind("component_pn")],
             [
                 "466898-0005",
                 "466898-0006",
@@ -428,13 +432,13 @@ class RealDatabaseReverseSmokeTests(unittest.TestCase):
             [number.number for number in result.numbers_of_kind("vehicle_oem")],
         )
 
-    def test_gk_0552_records_local_catalog_gap(self) -> None:
+    def test_gk_0552_uses_reviewed_service_number_types(self) -> None:
         result = self.database.reverse_search("GK-0552")
+        self.assertFalse(result.numbers_of_kind("turbo_pn"))
         self.assertEqual(
-            [number.number for number in result.numbers_of_kind("turbo_pn")],
-            ["454163-0001"],
+            [number.number for number in result.numbers_of_kind("component_pn")],
+            ["2 505 034"],
         )
-        self.assertFalse(result.numbers_of_kind("component_pn"))
 
 
 if __name__ == "__main__":
